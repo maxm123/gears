@@ -1,5 +1,4 @@
 package runtime
-import scala.util.boundary, boundary.Label
 
 import jdk.internal.vm.{Continuation, ContinuationScope}
 
@@ -7,25 +6,31 @@ import jdk.internal.vm.{Continuation, ContinuationScope}
 class Suspension[-T, +R]:
   def resume(arg: T): R = ???
 
-private class MySuspension[T, R] extends Suspension[T, R]:
-  private[runtime] var cont: Continuation = null
-  private[runtime] var res: Option[T] = None
-  private[runtime] var out: Option[R] = None
+object boundary:
+  def apply[R](body: Label[R] ?=> R): R =
+    val scope = new ContinuationScope(s"scala-runtime ${Thread.currentThread().threadId()}-${System.currentTimeMillis()}")
+    val label = Label[R](scope)
+
+    new Continuation(scope, () => {
+      label.result = Some(body(using label))
+    }).run()
+
+    label.result.get
+
+final class Label[R](private[runtime] val scope: ContinuationScope):
+  private[runtime] var result: Option[R] = None
+
+private final class MySuspension[T, R](l: Label[R]) extends Suspension[T, R]:
+  private[runtime] var nextInput: Option[T] = None
+  private val cont: Continuation = Continuation.getCurrentContinuation(l.scope)
 
   override def resume(arg: T): R =
-    res = Some(arg)
+    nextInput = Some(arg)
     cont.run()
-    out.get
+    l.result.get
 
-def suspend[T, R](body: Suspension[T, R] => R)(using Label[R]): T =
-  val scope = new ContinuationScope("scala-runtime")
-
-  val sus = new MySuspension[T, R]
-  val cont: Continuation = new Continuation(scope, () => {
-    sus.out = Some(body(sus))
-    Continuation.`yield`(scope)
-  })
-  sus.cont = cont
-  cont.run()
-
-  sus.res.get
+def suspend[T, R](body: Suspension[T, R] => R)(using l: Label[R]): T =
+  val sus = new MySuspension[T, R](l)
+  l.result = Some(body(sus))
+  Continuation.`yield`(l.scope)
+  sus.nextInput.get
