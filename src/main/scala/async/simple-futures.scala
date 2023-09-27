@@ -4,7 +4,7 @@ import scala.collection.mutable.ListBuffer
 import runtime.{suspend, boundary, Label}
 
 object Scheduler:
-  def schedule(task: Runnable): Unit = ???
+  def schedule(task: Runnable): Unit = Thread.startVirtualThread(task)
 
 trait Async:
   def await[T](f: Future[T]): T
@@ -12,17 +12,22 @@ trait Async:
 class Future[+T](body: Async ?=> T):
   private var result: Option[T] = None
   private var waiting: ListBuffer[T => Unit] = ListBuffer()
-  private def addWaiting(k: T => Unit): Unit = waiting += k
+  private def addWaiting(k: T => Unit): Unit =
+    synchronized:
+      result match
+        case None => waiting += k
+        case Some(value) => k(value)
 
   def await(using a: Async): T = a.await(this)
 
   private def complete(): Unit =
     Future.async:
       val value = body
-      val result = Some(value)
-      for k <- waiting do
-        Scheduler.schedule(() => k(value))
-      waiting.clear()
+      synchronized:
+        result = Some(value)
+        for k <- waiting do
+          Scheduler.schedule(() => k(value))
+        waiting.clear()
 
   Scheduler.schedule(() => complete())
 
