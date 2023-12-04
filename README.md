@@ -9,6 +9,7 @@ covering some aspects of the library. A general rationale and introduction follo
 
 # Towards A New Base Library for Asynchronous Computing
 
+Based on:
 Martin Odersky
 16 Feb 2023
 
@@ -27,8 +28,7 @@ As an example, here is some code using new, direct style futures:
     f1.value + f2.value
 ```
 We set up two futures that each read from a connection (which might take a while). We return the
-sum of the read values in a new future. The `value` method returns the result value of a future once it is available,
-or throws an exception if the future returns a `Failure`.
+sum of the read values in a new future. The `value` method returns the result value of a future once it is available, or throws an exception if the future returns a `Failure`.
 
 By contrast, with current, monadic style futures, we'd need a composition with `flatMap` to achieve the same effect:
 ```scala
@@ -76,9 +76,7 @@ trait Future[+T] extends Async.Source[Try[T]], Cancellable:
   def result(using async: Async): Try[T]
   def value(using async: Async): T = result.get
 ```
-Futures represent a computation that is completed concurrently. The computation
-yields a result value or a exception encapsulated in a `Try` result. The `value` method produces the future's value if it completed successfully or re-throws the
-exception contained in the `Failure` alternative of the `Try` otherwise.
+Futures represent a computation that is completed concurrently. The computation yields a result value or a exception encapsulated in a `Try` result. The `value` method produces the future's value if it completed successfully or re-throws the exception contained in the `Failure` alternative of the `Try` otherwise.
 
 The `result` method can be defined like this:
 ```scala
@@ -86,12 +84,11 @@ The `result` method can be defined like this:
 ```
 Here, `async` is a capability that allows to suspend in an `await` method. The `Async` trait is defined as follows:
 ```scala
-trait Async:
+trait Async(using val support: AsyncSupport, val scheduler: support.Scheduler):
   def await[T](src: Async.Source[T]): T
 
-  def scheduler: ExecutionContext
-  def group: CancellationGroup
-  def withGroup(group: CancellationGroup): Async
+  def group: CompletionGroup
+  def withGroup(group: CompletionGroup): Async
 ```
 The most important abstraction here is the `await` method.
 Code with the `Async` capability can _await_ an _asynchronous source_ of type `Async.Source`. This implies that the code will suspend if the
@@ -101,15 +98,12 @@ result of the async source is not yet ready. Futures are async sources of type `
 
 We have seen that futures are a particular kind of an async source. We will see other implementations related to channels later. Async sources are the primary means of communication between asynchronous computations and they can be composed in powerful ways.
 
-In particular, we have two extension methods on async sources of type `Source[T]`:
+In particular, we have an extension method on async sources of type `Source[T]` that transforms elements of that source:
 ```scala
   def map[U](f: T => U): Source[U]
-  def filter(p: T => Boolean): Source[T]
 ```
-`map` transforms elements of a `Source` whereas `filter` only passes on elements satisfying some condition.
 
-Furthermore, there is a `race` method that passes on the first of several
-sources:
+Furthermore, there is a `race` method that passes on the first of several sources:
 ```scala
   def race[T](sources: Source[T]*): Source[T]
 ```
@@ -119,8 +113,7 @@ These methods are building blocks for higher-level operations. For instance, `As
   def either[T1, T2](src1: Source[T1], src2: Source[T2]): Source[Either[T, U]] =
     race(src1.map(Left(_)), src2.map(Right(_)))
 ```
-We distinguish between _original_ async sources such as futures or channels and
-_derived_ sources such as the results of `map`, `filter`, or `race`.
+We distinguish between _original_ async sources such as futures or channels and _derived_ sources such as the results of `map` or `race`.
 
 Async sources need to define three abstract methods in trait `Async.Source[T]`:
 ```scala
@@ -129,26 +122,18 @@ Async sources need to define three abstract methods in trait `Async.Source[T]`:
     def onComplete(k: Listener[T]): Unit
     def dropListener(k: Listener[T]): Unit
 ```
-All three methods take a `Listener` argument. A `Listener[T]` is a function from `T` to `Boolean`.
-```scala
-  trait Listener[-T] extends (T => Boolean)
-```
-The `T` argument is the value obtained from an async source. A listener returns `true` if the argument was read by another async computation. It returns `false` if the argument was dropped by a `filter` or lost in a `race`.
-Listeners also come with a _lineage_, which tells us what source combinators were used to build a listener.
 
-The `poll` method of an async source allows to poll whether data is present. If that's the case, the listener `k` is applied to the data. The result of `poll` is the result of the listener if it was applied and `false` otherwise. There is also a first-order variant of `poll` that returns data in an `Option`. It is defined
+The `poll` method of an async source allows to poll whether data is present. If that's the case, the listener `k` is applied to the data. The result of `poll` is `true` if the source has data available (independent of the listener's availability, see below) and `false` otherwise. There is also a first-order variant of `poll` that returns data in an `Option`. It is defined
 as follows:
 ```scala
   def poll(): Option[T] =
     var resultOpt: Option[T] = None
-    poll { x => resultOpt = Some(x); true }
+    poll(Listener.acceptingListener { (x, _) => resultOpt = Some(x) })
     resultOpt
 ```
-The `onComplete` method of an async source calls the listener `k` once data is present. This could either be immediately, in which case the effect is the same as `poll`, or it could be in the future in which case the listener is installed  in waiting lists in the original sources on which it depends so that it can be called when the data is ready. Note that there could be several such original  sources, since the listener could have been passed to a `race` source, which itself depends on several other sources.
+The `onComplete` method of an async source calls the listener `k` once data is present. This could either be immediately, in which case the effect is the same as `poll`, or it could be in the future in which case the listener is installed in waiting lists in the original sources on which it depends so that it can be called when the data is ready. Note that there could be several such original sources, since the listener could have been passed to a `race` source, which itself depends on several other sources.
 
-The `dropListener` method drops the listener `k` from the waiting lists of all original sources on which it depends. This an optimization that is necessary in practice
-to support races efficiently. Once a race is decided, all losing listeners will
-never pass data (i.e. they always return `false`), so we do not want them to clutter the waiting lists of their original sources anymore.
+The `dropListener` method drops the listener `k` from the waiting lists of all original sources on which it depends. This an optimization that is necessary in practice to support races efficiently. Once a race is decided, all losing listeners will never pass data (i.e. they always return `false`), so we do not want them to clutter the waiting lists of their original sources anymore. In general, we recommend listeners that get somehow completed externally, to be dropped from their sources for the same reason.
 
 A typical way to implement `onComplete` for original sources is to poll first and install a listener only if no data is present. This behavior is encapsulated in the `OriginalSource` abstraction:
 ```scala
@@ -161,6 +146,37 @@ A typical way to implement `onComplete` for original sources is to poll first an
       if !poll(k) then addListener(k)
 ```
 So original sources are defined in terms if `poll`, `addListener`, and `dropListener`.
+
+
+## Listeners
+
+All three methods of a async source take a `Listener` argument which is defined as follows:
+```scala
+trait Listener[-T]:
+  def complete(data: T, source: Async.Source[T]): Unit
+  val lock: Listener.ListenerLock | Null
+
+  def lockCompletely(source: Async.Source[T]): Locked.type | Gone.type
+  def releaseLock(to: Listener.LockMarker): Unit
+
+  def completeNow(data: T, source: Async.Source[T]): Boolean
+```
+The `T` argument is the value obtained from an async source. The basic operation of a listener is the `complete` operation which is passed the value from the async source and the source instance itself. A listener may also employ locking, which is especially important for not taking elements away from channels if they would be lost in a race. If it does not, `lock` is null and complete can always be called. If it does, complete may only be called with the lock held and `lock` is set to an instance with these abstract members:
+
+```scala
+  trait ListenerLock:
+    val selfNumber: Long
+    def lockSelf(source: Async.Source[?]): LockResult
+    def release(to: Listener.LockMarker): ListenerLock | Null
+```
+
+The `lockSelf` operation locks the listener's lock and checks whether the listener can still take an element from the given source. The result can be `Locked` (completable), `Gone` (not completable), or a `PartialLock`. A `PartialLock` represents an intermediate step in locking where the listener would consider itself completable but the final decision depends on a downstream listener (e.g., on the original listener passed to a race source). The selfNumber is a unique number for native locks that can be obtained by deriving `NumberedLock`. It is used for deadlock prevention when locking two listeners at the same time. This can be done using the following utility method:
+```scala
+def lockBoth[T, U](st: Async.Source[T], su: Async.Source[U])(lt: Listener[T], lu: Listener[U]): lt.type | lu.type | Locked.type
+```
+It takes two listeners with the corresponding sources to pass to `lockSelf`. It returns `Locked` if both listeners can be locked, or the listener instance that rejected first.
+
+Sources will usually use `completeNow` to lock and complete a listener immediately. It handles locking and returns true if the locking succeeded and the listener was completed, false otherwise. If a source needs to complete two listeners atomically (as a rendezvous channel does), it can use `lockBoth` and `complete`. If a lock is acquired but the listener is not completed, it should be released with `releaseLock(Locked)`. The parameter can also be a `PartialLock` if locking failed or is cancelled in an intermediate step.
 
 ## Creating Futures
 
@@ -178,8 +194,7 @@ The `Future.apply` method has the following signature:
 ```
 `apply` wraps an `Async` capability with cancellation handling (tied to the returned `Future`) and passes it to its `body` argument.
 
-Futures also have a set of useful combinators that support what is usually called _structured concurrency_. In particular, there is the `zip` operator,
-which takes two futures and if they both complete successfully returns their results in a pair. If one or both of the operand futures fail, the first failure is returned as failure result of the zip. Dually, there is the `alt` operator, which returns the result of the first succeeding future and fails only if both operand futures fail.
+Futures also have a set of useful combinators that support what is usually called _structured concurrency_. In particular, there is the `zip` operator, which takes two futures and if they both complete successfully returns their results in a pair. If one or both of the operand futures fail, the first failure is returned as failure result of the zip. Dually, there is the `alt` operator, which returns the result of the first succeeding future and fails only if both operand futures fail.
 
 `zip` and `alt` can be implemented as extension methods on futures as follows:
 
@@ -212,42 +227,26 @@ Futures that are no longer needed can be cancelled. `Future` extends the `Cancel
 ```scala
   trait Cancellable:
     def cancel(): Unit
-    def link(group: CancellationGroup): this.type
+    def link(group: CompletionGroup): this.type
     ...
 ```
-A cancel request is transmitted via the `cancel` method. It sets the
-`cancelRequest` flag of the future to `true`. The flag is tested
-before and after each `await` and can also be tested from user code.
-If a test returns `true`, a `CancellationException` is thrown, which
-usually terminates the running future.
+A cancel request is transmitted via the `cancel` method. It interrupts running `await`s and sets the `cancelRequest` flag of the future to `true`. The flag is also tested before each `await`. If a test returns `true` or the cancellation was requested while awaiting, a `CancellationException` is thrown, which usually terminates the running future.
 
-## Cancellation Groups
+## Completion Groups
 
-A cancellable object such as a future belongs to a `CancellationGroup`.
-Cancellation groups are themselves cancellable objects. Cancelling
-a cancellation group means cancelling all its members.
+A cancellable object such as a future belongs to a `CompletionGroup`. Completion groups are themselves cancellable objects. Cancelling a completion group means cancelling all its members.
 ```scala
-class CancellationGroup extends Cancellable:
-  private var members: mutable.Set[Cancellable] = mutable.Set()
-
-  /** Cancel all members and clear the members set */
-  def cancel() =
-    members.toArray.foreach(_.cancel())
-    members.clear()
-
-  /** Add given member to the members set */
-  def add(member: Cancellable): Unit = synchronized:
-    members += member
-
-  /** Remove given member from the members set if it is an element */
-  def drop(member: Cancellable): Unit = synchronized:
-    members -= member
+class CompletionGroup(val handleCompletion: Cancellable => Async ?=> Unit) extends Cancellable.Tracking:
+  def cancel(): Unit
+  def add(member: Cancellable): Unit
+  def drop(member: Cancellable): Unit
 ```
-One can include a cancellable object in a cancellation group using
-the object's `link` method. An object can belong only to one cancellation group, so linking an already linked cancellable object will unlink it from its previous cancellation group. The `link` method is defined
-as follows:
+
+Cancellation is persistent, such that a member that is added after a call to `cancel` is cancelled immediately. Cancelled objects drop themselves from the group once they finished their cleanup. This is used internally to await termination of a cancelled group.
+
+One can include a cancellable object in a completion group using the object's `link` method. An object can belong only to one completion group, so linking an already linked cancellable object will unlink it from its previous completion group. The `link` method is defined as follows:
 ```scala
-def link(group: CancellationGroup): this.type =
+def link(group: CompletionGroup): this.type =
     this.group.drop(this)
     this.group = group
     this.group.add(this)
@@ -261,14 +260,12 @@ trait Cancellable:
   def link()(using async: Async): this.type =
     link(async.group)
   def unlink(): this.type =
-    link(CancellationGroup.Unlinked)
+    link(CompletionGroup.Unlinked)
 ```
-The second variant of `link` links a cancellable object to the group of the current `Async` context. The `unlink` method drops a cancellable object from its group. This is achieved by "linking" the object to the
-special `Unlinked` cancellation group, which ignores all cancel requests
-as well as all add/drop member requests.
+The second variant of `link` links a cancellable object to the group of the current `Async` context. The `unlink` method drops a cancellable object from its group. This is achieved by "linking" the object to the special `Unlinked` completion group, which ignores all cancel requests as well as all add/drop member requests.
 ```scala
-object CancellationGroup
-  object Unlinked extends CancellationGroup:
+object CompletionGroup
+  object Unlinked extends CompletionGroup:
     override def cancel() = ()
     override def add(member: Cancellable): Unit = ()
     override def drop(member: Cancellable): Unit = ()
@@ -291,17 +288,18 @@ The mechanism which achieves this is as follows: When defining a future,
 the body of the future is run in the scope of an `Async.group` wrapper, which is defined like this:
 ```scala
   def group[T](body: Async ?=> T)(using async: Async): T =
-    val newGroup = CancellationGroup().link()
+    val newGroup = CompletionGroup().link()
     try body(using async.withGroup(newGroup))
-    finally newGroup.cancel()
+    finally
+      newGroup.cancel()
+      newGroup.waitCompletion()(using async.withGroup(CompletionGroup.Unlinked))
 ```
-The `group` wrapper sets up a new cancellation group, runs the given `body` in an `Async` context with that group, and finally cancels the group once `body` has finished.
+The `group` wrapper sets up a new completion group, runs the given `body` in an `Async` context with that group, and finally cancels the group and awaits its termination once `body` has finished.
 
 ## Channels
 
 Channels are a means for futures and related asynchronous computations to synchronize and exchange messages.
-There are
-two broad categories of channels: _asynchronous_ or _synchronous_.Synchronous channels block the sender of a message until it is received, whereas asynchronous channels don't do this as a general rule (but they might still block a sender by some back-pressure mechanism or if a bounded buffer gets full).
+There are two broad categories of channels: _asynchronous_ or _synchronous_. Synchronous channels block the sender of a message until it is received, whereas asynchronous channels don't do this as a general rule (but they might still block a sender by some back-pressure mechanism or if a bounded buffer gets full).
 
 The general interface of a channel is as follows:
 ```scala
@@ -446,7 +444,7 @@ An async context provides three elements:
 
  - an `await` method that allows a caller to suspend while waiting for the result of an async source to arrive,
  - a `scheduler` value that refers to execution context on which tasks are scheduled,
- - a `group` value that contains a cancellation group which determines the default linkage of all cancellable objects that are created in an async context.
+ - a `group` value that contains a completion group which determines the default linkage of all cancellable objects that are created in an async context.
 
 ## Implementing Await
 
@@ -530,3 +528,113 @@ private def async(body: Async ?=> Unit): Unit =
 
   body(using FutureAsync(...))
 ```
+
+### Implementation in Gears
+
+Gears contains an abstraction over those two implementations. It is defined as follows:
+
+```scala
+trait Suspension[-T, +R]:
+    def resume(arg: T): R
+
+trait SuspendSupport:
+    type Label[R]
+    type Suspension[-T, +R] <: gears.async.Suspension[T, R]
+
+    def boundary[R](body: Label[R] ?=> R): R
+    def suspend[T, R](body: Suspension[T, R] => R)(using Label[R]): T
+
+trait AsyncSupport extends SuspendSupport:
+    type Scheduler <: gears.async.Scheduler
+
+    private[async] def resumeAsync[T, R](suspension: Suspension[T, R])(arg: T)(using s: Scheduler): Unit =
+        s.execute(() => suspension.resume(arg))
+
+    private[async] def scheduleBoundary(body: Label[Unit] ?=> Unit)(using s: Scheduler): Unit =
+        s.execute(() => boundary(body))
+
+trait Scheduler:
+    def execute(body: Runnable): Unit
+    def schedule(delay: FiniteDuration, body: Runnable): Cancellable
+```
+
+While the `SuspendSupport` defines the interface of the delimited continuations introduced above, the `AsyncSupport` extends it providing merged operations of continuations and scheduling. This allows to plug in a green fiber implementation while avoiding most of the overhead for the common Future operations.
+
+Using JVM’s virtual threads, a scheduler can be implemented like this:
+```scala
+object VThreadScheduler extends Scheduler:
+  override def execute(body: Runnable): Unit = Thread.startVirtualThread(body)
+
+  override def schedule(delay: FiniteDuration, body: Runnable): Cancellable =
+    val th = Thread.startVirtualThread: () =>
+      Thread.sleep(delay.toMillis)
+      body.run()
+    () => th.interrupt()
+```
+
+The suspension is implemented similarly as described in the fiber approach above using virtual thread-compatible locks and condition variables. The data returned by the body parameter of `suspend` is stored in the label while the data given to `resume` is stored in the suspension instance.
+```scala
+  class VThreadSuspension[-T, +R](using val label: Label[R] @uncheckedVariance) extends Suspension[T, R]:
+    private var nextInput: Option[T] = None
+    private val lock = ReentrantLock()
+    private val cond = lock.newCondition()
+
+    def setInput(data: T) =
+      lock.lock()
+      try
+        nextInput = Some(data)
+        cond.signalAll()
+      finally
+        lock.unlock()
+
+    def waitInput(): T @uncheckedVariance =
+      lock.lock()
+      try
+        while nextInput.isEmpty do
+          cond.await()
+        nextInput.get
+      finally
+        lock.unlock()
+
+    override def resume(data: T): R =
+      label.clearResult()
+      setInput(data)
+      label.waitResult()
+```
+
+`setInput` and `waitInput` constitute a basic blocking channel. This is used in `resume` to continue the suspended operation (that awaits the input) while parking the operation that called `resume` until the suspended (now running) operation suspends again or finishes. Suspend is then implemented as follows:
+```scala
+  override def suspend[T, R](body: Suspension[T, R] => R)(using label: Label[R]): T =
+    val suspension = new VThreadSuspension[T, R]()
+    val result = body(suspension)
+    label.setResult(result)
+    suspension.waitInput()
+```
+
+Here, the outer context (creator of the boundary/label or caller of `resume`) is waked up in `setResult` while the operation that called suspend now waits for the next input.
+
+The boundary must be detached from the calling operation (because it can suspend at any time). It is therefore spawned as a virtual thread (fiber).
+
+```scala
+override def boundary[R](body: (Label[R]) ?=> R): R =
+    val label = VThreadLabel[R]()
+    Thread.startVirtualThread: () =>
+      val result = body(using label)
+      label.setResult(result)
+
+    label.waitResult()
+```
+On the caller’s side, the label is set up, a new thread is started, and the label is awaited. It may either be completed by a `suspend` from within the body or by the final result.
+
+For the common use case of scheduling a boundary (for starting a future) or scheduling the `resume` of a suspension (for resuming a waiting Future), a virtual thread is started by the scheduling. This thread is only used for starting another thread (implementation of a `boundary`) or for setting a variable (implementation of `resume`) and blocking afterwards (in both cases). Instead the following conjoint methods are used:
+```scala
+  def scheduleBoundary(body: (Label[Unit]) ?=> Unit)(using Scheduler): Unit =
+    Thread.startVirtualThread: () =>
+      val label = VThreadLabel[Unit]()
+      body(using label)
+
+  def resumeAsync[T, R](suspension: Suspension[T, R])(data: T)(using Scheduler): Unit =
+      suspension.label.clearResult()
+      suspension.setInput(data)
+```
+The difference to `boundary` and `resume` as presented above is the missing `waitResult` and `waitInput`, respectively. These operations would make the operations blocking. When they are omitted, no more thread needs to be spawned.
