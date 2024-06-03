@@ -140,6 +140,8 @@ object Future:
               src.dropListener(listener)
               ac.support.resumeAsync(suspension)(Failure(new CancellationException()))
 
+          override def hashCode(): Int = 50401256
+
         if group.isCancelled then throw new CancellationException()
 
         src
