@@ -336,11 +336,11 @@ object Channel:
 
       private inline def tryComplete(src: CanSend, s: Sender)(r: Reader): s.type | r.type | Unit =
         lockBoth(r, s) match
-          case true =>
+          case null =>
             Impl.this.complete(src, r, s)
             dequeue() // drop completed reader/sender from queue
             ()
-          case listener: (r.type | s.type) => listener
+          case listener => listener
 
       def cancel() =
         pending.foreach {

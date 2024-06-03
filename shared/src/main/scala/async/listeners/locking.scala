@@ -14,7 +14,7 @@ case class ConflictingLocksException(
 /** Attempt to lock both listeners belonging to possibly different sources at the same time. Lock orders are respected
   * by comparing numbers on every step.
   *
-  * Returns `true` on success, or the listener that fails first.
+  * Returns `null` on success, or the listener that fails first.
   *
   * @throws ConflictingLocksException
   *   In the case that two locks sharing the same number is encountered, this exception is thrown with the conflicting
@@ -23,20 +23,20 @@ case class ConflictingLocksException(
 def lockBoth[T, U](
     lt: Listener[T],
     lu: Listener[U]
-): lt.type | lu.type | true =
-  val lockT = if lt.lock == null then return (if lu.acquireLock() then true else lu) else lt.lock
-  val lockU = if lu.lock == null then return (if lt.acquireLock() then true else lt) else lu.lock
+): lt.type | lu.type | Null =
+  val lockT = if lt.lock == null then return (if lu.acquireLock() then null else lu) else lt.lock
+  val lockU = if lu.lock == null then return (if lt.acquireLock() then null else lt) else lu.lock
 
   inline def doLock[T, U](lt: Listener[T], lu: Listener[U])(
       lockT: ListenerLock,
       lockU: ListenerLock
-  ): lt.type | lu.type | true =
+  ): lt.type | lu.type | Null =
     // assert(lockT.number > lockU.number)
     if !lockT.acquire() then lt
     else if !lockU.acquire() then
       lockT.release()
       lu
-    else true
+    else null
 
   if lockT.selfNumber == lockU.selfNumber then throw ConflictingLocksException((lt, lu))
   else if lockT.selfNumber > lockU.selfNumber then doLock(lt, lu)(lockT, lockU)

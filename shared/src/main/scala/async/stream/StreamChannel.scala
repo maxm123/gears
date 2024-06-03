@@ -396,11 +396,11 @@ object BufferedStreamChannel:
 
       private inline def tryComplete(src: CanSend, s: Sender)(r: Reader): s.type | r.type | Unit =
         lockBoth(r, s) match
-          case true =>
+          case null =>
             ImplBase.this.complete(src, r, s)
             dequeue() // drop completed reader/sender from queue
             ()
-          case listener: (r.type | s.type) => listener
+          case listener => listener
 
       private inline def cancel[U](count: Int)(inline f: Cell => U): Unit =
         if count > 0 then
