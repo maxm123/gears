@@ -51,22 +51,19 @@ object Async:
 
     /** Wait for completion of async source `src` and return the result */
     override def await[T](src: Async.Source[T]): T =
-      src
-        .poll()
-        .getOrElse:
-          var result: Option[T] = None
-          src onComplete Listener.acceptingListener: (t, _) =>
-            lock.lock()
-            try
-              result = Some(t)
-              condVar.signalAll()
-            finally lock.unlock()
+      var result: Option[T] = None
+      src onComplete Listener.acceptingListener: (t, _) =>
+        lock.lock()
+        try
+          result = Some(t)
+          condVar.signalAll()
+        finally lock.unlock()
 
-          lock.lock()
-          try
-            while result.isEmpty do condVar.await()
-            result.get
-          finally lock.unlock()
+      lock.lock()
+      try
+        while result.isEmpty do condVar.await()
+        result.get
+      finally lock.unlock()
 
     /** An Async of the same kind as this one, with a new cancellation group */
     override def withGroup(group: CompletionGroup): Async = Blocking(group)

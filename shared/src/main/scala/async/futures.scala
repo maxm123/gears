@@ -144,21 +144,18 @@ object Future:
 
         if group.isCancelled then throw new CancellationException()
 
-        src
-          .poll()
-          .getOrElse:
-            val cancellable = CancelSuspension()
-            val res = ac.support.suspend[Try[U], Unit](k =>
-              val listener = Listener.acceptingListener[U]: (x, _) =>
-                val completedBefore = cancellable.complete()
-                if !completedBefore then ac.support.resumeAsync(k)(Success(x))
-              cancellable.suspension = k
-              cancellable.listener = listener
-              cancellable.link(group) // may resume + remove listener immediately
-              src.onComplete(listener)
-            )
-            cancellable.unlink()
-            res.get
+        val cancellable = CancelSuspension()
+        val res = ac.support.suspend[Try[U], Unit](k =>
+          val listener = Listener.acceptingListener[U]: (x, _) =>
+            val completedBefore = cancellable.complete()
+            if !completedBefore then ac.support.resumeAsync(k)(Success(x))
+          cancellable.suspension = k
+          cancellable.listener = listener
+          cancellable.link(group) // may resume + remove listener immediately
+          src.onComplete(listener)
+        )
+        cancellable.unlink()
+        res.get
 
       override def withGroup(group: CompletionGroup) = FutureAsync(group)
 
