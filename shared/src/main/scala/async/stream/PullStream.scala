@@ -56,7 +56,8 @@ trait PullReaderStream[+T]:
     new PullLayers.FlatMapLayer.ReaderMixer(this, outerParallelism, mapper)
 
   /** Transform this pull stream into a push stream by introducing an active component that pulls items, possibly
-    * transforms them, and pushes them downstream.
+    * transforms them, and pushes them downstream. On successful completion, the sender is closed automatically, unless
+    * the task throws (any exception), in which case it is itself responsible for closing the passed sender.
     *
     * @param parallelism
     *   The number of task instances that are spawned. The actual number may be limited by sender/reader capabilities.
@@ -77,11 +78,27 @@ trait PullReaderStream[+T]:
               val r = handleMaybeIt(readers)(identity)(_.next)
               val s = handleMaybeIt(senders)(identity)(_.next)
               task(r, s)
+              s.close()
             else
               val ri = handleMaybeIt(readers)(Iterator.continually)(identity)
-              val si = handleMaybeIt(senders)(Iterator.continually)(identity)
+              var theSingle: StreamSender[V] = null // used for closing: single may only be closed at the very end
+              val si = handleMaybeIt(senders) { single =>
+                theSingle = single
+                Iterator.continually(single)
+              }(identity)
+
               Async.group:
-                (ri zip si).take(parallelism).map { (r, s) => Future(task(r, s)) }.foreach(_.await)
+                val pairIterator = (ri zip si).take(parallelism)
+                val futureIterator =
+                  if theSingle != null then pairIterator.map { (r, s) => Future(task(r, s)) }
+                  else
+                    // sender per task instance -> close it once the task is done
+                    pairIterator.map: (r, s) =>
+                      val fut = Future(task(r, s))
+                      fut.onComplete(Listener { (_, _) => s.close() })
+                      fut
+                futureIterator.foreach(_.await)
+              if theSingle != null then theSingle.close()
           catch case _: StreamResult.StreamTerminatedException => {} // main goal: to cancel Async.group
 
   def pushed(parallelism: Int): PushSenderStream[T] = pushedBy(parallelism): (reader, sender) =>
@@ -94,12 +111,13 @@ trait PullReaderStream[+T]:
 
     try
       while result.isEmpty do result = handle()
-      sender.terminate(result.get) // in case (1) --> notify downstream
 
       result.get match // case (1B) --> interrupt stream operation
-        case t: Throwable               => throw StreamResult.StreamTerminatedException(t)
-        case _: StreamResult.Terminated => throw StreamResult.StreamTerminatedException()
-        case _                          => {} // case (1A) --> just stop this single task silently
+        case _: StreamResult.Closed => {} // case (1A) --> just stop this single task silently
+        case res =>
+          sender.terminate(res)
+          if res.isInstanceOf[Throwable] then throw StreamResult.StreamTerminatedException(res.asInstanceOf[Throwable])
+          else throw StreamResult.StreamTerminatedException() // terminated
     catch case _: ChannelClosedException => {} // case (2A) --> just stop silently, but case (2B) goes up to interrupt
 
 trait PullChannelStream[+T] extends PullReaderStream[T]:
