@@ -7,11 +7,14 @@ import gears.async.ChannelClosedException
 import gears.async.Future
 import gears.async.Listener
 import gears.async.Resource
+import gears.async.Semaphore
 import gears.async.SourceUtil
 
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.Lock
 import java.util.concurrent.locks.ReentrantLock
+import scala.collection.mutable.ArrayBuffer
 
 /** A destination can either be a single Sender or a factory. If it is a factory, the producer should create a new
   * instance for every parallel execution. A termination/intermediary step might decide it's sender logic is not
@@ -40,6 +43,9 @@ trait PushSenderStream[+T] extends PushChannelStream[T]:
     new PushLayers.TakeLayer.SenderMixer[T]
       with PushLayers.TakeLayer.TakeLayer(count)
       with PushLayers.FromSenderLayer(this)
+
+  def flatMap[V](outerParallelism: Int)(mapper: T => PushSenderStream[V]): PushSenderStream[V] =
+    new PushLayers.FlatMapLayer.SenderMixer[T, V](mapper, outerParallelism, this)
 
 trait PushChannelStream[+T]:
   def runToChannel(channel: PushDestination[SendableStreamChannel, T])(using Async): Unit
@@ -240,4 +246,127 @@ private object PushLayers:
           mapMaybeIt(channel)(c => new ChannelLayer[T](counter, sentCounter, lock) with ToSender(c))
         )
   end TakeLayer
+
+  object FlatMapLayer:
+    trait ConcatMapper[T, V](val mapper: T => PushSenderStream[V])
+
+    // as there is only one outer sender per flatmap, it can contain all the global data
+    abstract class OuterSender[T, V](mapper: T => PushSenderStream[V], outerParallelism: Int) extends StreamSender[T]:
+      private val sem = Semaphore(outerParallelism)
+      @volatile protected var termination: StreamResult.Done = null
+
+      type Dest <: PushDestination[StreamSender, V]
+
+      protected def getInner(): Dest
+      protected def yieldInner(sender: Dest): Unit
+      def closeInner(): Unit
+
+      override def send(x: T)(using Async): Unit =
+        if termination != null then throw ChannelClosedException()
+
+        val stream = mapper(x)
+        sem.acquire()
+        val dest = getInner()
+        try stream.runToSender(dest)
+        finally
+          try yieldInner(dest)
+          finally sem.release()
+
+      override def terminate(value: StreamResult.Done): Boolean =
+        synchronized:
+          if termination == null then
+            termination = value
+            true
+          else false
+    end OuterSender
+
+    class SingleSender[T, V](mapper: T => PushSenderStream[V], outerParallelism: Int, sender: StreamSender[V])
+        extends OuterSender[T, V](mapper, outerParallelism):
+      type Dest = StreamSenderWrapper[V]
+
+      // a new wrapper is needed per stream to correctly handle reject-after-termination
+      override protected def getInner(): StreamSenderWrapper[V] = StreamSenderWrapper(sender)
+      // the overhead of managing a queue seems to be larger than just creating one new wrapper per inner stream
+      override protected def yieldInner(sender: StreamSenderWrapper[V]): Unit =
+        sender.clearTermination() // used to bubble up exception
+
+      override def closeInner(): Unit = sender.terminate(termination)
+
+    class IteratorSender[T, V](
+        mapper: T => PushSenderStream[V],
+        outerParallelism: Int,
+        senders: Iterator[StreamSender[V]]
+    ) extends OuterSender[T, V](mapper, outerParallelism):
+      senderSelf =>
+      type Dest = WrapperIterator
+      private val pool = ConcurrentLinkedQueue[StreamSenderWrapper[V]]()
+
+      class WrapperIterator extends Iterator[StreamSenderWrapper[V]]:
+        val acquired = ArrayBuffer[StreamSenderWrapper[V]]()
+        private var current: StreamSenderWrapper[V] = null
+
+        override def hasNext: Boolean =
+          if current != null then return true
+
+          current = pool.poll()
+          if current == null then
+            senderSelf.synchronized:
+              if senders.hasNext then current = StreamSenderWrapper(senders.next())
+
+          if current != null then
+            acquired.addOne(current)
+            true
+          else false
+
+        override def next(): StreamSenderWrapper[V] =
+          val res = current
+          current = null
+          res
+      end WrapperIterator
+
+      override protected def getInner(): WrapperIterator = WrapperIterator()
+      override protected def yieldInner(senders: WrapperIterator): Unit =
+        senders.acquired.foreach(pool.add)
+        // add all first because the following can throw
+        senders.acquired.foreach(_.clearTermination())
+
+      override def closeInner(): Unit =
+        val t: StreamResult.Done = termination
+        pool.forEach(_.terminate(t))
+    end IteratorSender
+
+    class StreamSenderWrapper[-V](sender: StreamSender[V]) extends StreamSender[V]:
+      @volatile private var termination: StreamResult.Done = null
+
+      override def send(x: V)(using Async): Unit =
+        if termination != null then throw ChannelClosedException()
+        sender.send(x)
+
+      override def terminate(value: StreamResult.Done): Boolean =
+        val didTerminate = synchronized:
+          if termination == null then
+            termination = value
+            true
+          else false
+
+        // forward exceptional termination
+        if didTerminate && value.isInstanceOf[Throwable] then sender.terminate(value)
+
+        didTerminate
+
+      def clearTermination() =
+        if termination != null && termination.isInstanceOf[Throwable] then
+          throw StreamResult.StreamTerminatedException(termination.asInstanceOf[Throwable])
+        termination = null
+    end StreamSenderWrapper
+
+    class SenderMixer[T, V](mapper: T => PushSenderStream[V], outerParallelism: Int, upstream: PushSenderStream[T])
+        extends PushSenderStream[V]:
+      def runToSender(sender: PushDestination[StreamSender, V])(using Async): Unit =
+        val outerSender = handleMaybeIt(sender)(new SingleSender(mapper, outerParallelism, _))(
+          new IteratorSender(mapper, outerParallelism, _)
+        )
+        try upstream.runToSender(outerSender)
+        finally outerSender.closeInner()
+  end FlatMapLayer
 end PushLayers
