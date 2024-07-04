@@ -127,17 +127,20 @@ trait PullChannelStream[+T] extends PullReaderStream[T]:
   def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]]
   override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, T]] = toChannel(parallelism)
 
-  override def map[V](mapper: T => V): PullChannelStream[V] =
+  // These methods do not override their PullReaderStream correspondents because some implementations add an overhead
+  // that should not implicitly be added unless the programmer requires the full channel access.
+
+  def channelMap[V](mapper: T => V): PullChannelStream[V] =
     new PullLayers.MapLayer.ChannelMixer[T, V]
       with PullLayers.MapLayer.MapLayer(mapper)
       with PullLayers.FromChannelLayer(this)
 
-  override def filter(test: T => Boolean): PullChannelStream[T] =
+  def channelFilter(test: T => Boolean): PullChannelStream[T] =
     new PullLayers.FilterLayer.ChannelMixer[T]
       with PullLayers.FilterLayer.FilterLayer(test)
       with PullLayers.FromChannelLayer(this)
 
-  override def take(count: Int): PullChannelStream[T] =
+  def channelTake(count: Int): PullChannelStream[T] =
     new PullLayers.TakeLayer.ChannelMixer[T]
       with PullLayers.TakeLayer.TakeLayer(count)
       with PullLayers.FromChannelLayer(this)
