@@ -14,9 +14,13 @@ import gears.async.stream.StreamResult.StreamResult
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.Lock
 import java.util.concurrent.locks.ReentrantLock
 import scala.collection.mutable.ArrayBuffer
+import scala.util.Failure
+import scala.util.Success
+import scala.util.Try
 
 /** A source should provide means for parallel execution. As the execution is driven by the consumer, the consumer tells
   * the producer the degree of parallelism (see [[PullReaderStream.runWithReader]]) and the producer decides whether its
@@ -54,6 +58,42 @@ trait PullReaderStream[+T]:
 
   def flatMap[V](outerParallelism: Int)(mapper: T => PullReaderStream[V]): PullReaderStream[V] =
     new PullLayers.FlatMapLayer.ReaderMixer(this, outerParallelism, mapper)
+
+  def fold(parallelism: Int, folder: StreamFolder[T])(using Async): Try[folder.Container] =
+    require(parallelism > 0)
+
+    val ref = AtomicReference[Option[folder.Container]](None)
+
+    def read(reader: StreamReader[T])(using Async): folder.Container =
+      var container = folder.create()
+      val handle = reader.pull(item => { container = folder.add(container, item); true })
+      var result: Option[StreamResult.Done] = None
+
+      while result.isEmpty do result = handle()
+      if result.get.isInstanceOf[Throwable] then
+        throw StreamResult.StreamTerminatedException(result.get.asInstanceOf[Throwable])
+
+      container
+
+    def readAndMerge(reader: StreamReader[T])(using Async): Unit =
+      StreamFolder.mergeAll(folder, read(reader), ref)
+
+    try
+      this
+        .toReader(parallelism)
+        .use: readers =>
+          if parallelism == 1 then
+            val r = handleMaybeIt(readers)(identity)(_.next)
+            Success(read(r))
+          else
+            Async.group:
+              handleMaybeIt(readers)(Iterator.continually)(identity)
+                .take(parallelism)
+                .map(reader => Future(readAndMerge(reader)))
+                .foreach(_.await)
+            Success(ref.get().get)
+    catch case e: StreamResult.StreamTerminatedException => Failure(e.getCause())
+  end fold
 
   /** Transform this pull stream into a push stream by introducing an active component that pulls items, possibly
     * transforms them, and pushes them downstream. On successful completion, the sender is closed automatically, unless

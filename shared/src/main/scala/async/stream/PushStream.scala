@@ -12,9 +12,11 @@ import gears.async.SourceUtil
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.Lock
 import java.util.concurrent.locks.ReentrantLock
 import scala.collection.mutable.ArrayBuffer
+import scala.util.Try
 
 /** A destination can either be a single Sender or a factory. If it is a factory, the producer should create a new
   * instance for every parallel execution. A termination/intermediary step might decide it's sender logic is not
@@ -85,6 +87,42 @@ trait PushChannelStream[+T]:
     new PushLayers.TakeLayer.ChannelMixer[T]
       with PushLayers.TakeLayer.TakeLayer(count)
       with PushLayers.FromChannelLayer(this)
+
+  def fold(folder: StreamFolder[T])(using Async): Try[folder.Container] =
+    val ref = AtomicReference[Option[folder.Container]](None)
+
+    class Sender extends SendableStreamChannel[T]:
+      var container = folder.create()
+      var closed = false
+
+      override def send(x: T)(using Async): Unit = synchronized {
+        if closed then throw ChannelClosedException()
+        container = folder.add(container, x)
+      }
+
+      override def sendSource(x: T): Async.Source[Channel.Res[Unit]] = new Async.Source:
+        override def poll(): Some[Channel.Res[Unit]] =
+          Some(Try(send(x)).toEither.left.map(_ => Channel.Closed))
+        override def poll(k: Listener[Channel.Res[Unit]]): Boolean =
+          if !k.acquireLock() then return true
+          k.complete(poll().value, this)
+          true
+        override def onComplete(k: Listener[Channel.Res[Unit]]): Unit = poll(k)
+        override def dropListener(k: Listener[Channel.Res[Unit]]): Unit = ()
+
+      override def terminate(value: StreamResult.Done): Boolean =
+        val justClosed = synchronized:
+          val justClosed = !closed
+          closed = true
+          justClosed
+        if justClosed then StreamFolder.mergeAll(folder, container, ref)
+        justClosed
+    end Sender
+
+    Try:
+      this.runToChannel(Iterator.continually(new Sender))
+      ref.get().get
+  end fold
 
 private object PushLayers:
   // helpers for generating the layer ("mixer") traits (for derived streams)
