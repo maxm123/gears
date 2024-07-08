@@ -107,6 +107,11 @@ trait PullReaderStream[+T] extends Stream[T]:
     catch case e: StreamResult.StreamTerminatedException => Failure(e.getCause())
   end fold
 
+  override def parallel(bufferSize: Int, parallelism: Int): PullReaderStream[T] =
+    // note that the given parallelism should be applied to steps following hereafter
+    //  -> set as parallelismHint for new stream and use this streams parallelismHint for pulling this stream
+    toPushStream(parallelismHint).pulledThrough(bufferSize, parallelism)
+
   override def fold(folder: StreamFolder[T])(using Async): Try[folder.Container] = fold(parallelismHint, folder)
   override def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T] = this
   override def toPushStream(): PushSenderStream[T] = toPushStream(parallelismHint)

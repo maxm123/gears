@@ -3,6 +3,7 @@ package gears.async.stream
 import gears.async.Async
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.annotation.targetName
 import scala.util.Try
 
 trait StreamFolder[-T]:
@@ -90,6 +91,19 @@ trait Stream[+T]:
     */
   def fold(folder: StreamFolder[T])(using Async): Try[folder.Container]
 
+  /** Introduce an asynchronous boundary decoupling upstream computation steps from downstream. The resulting stream
+    * will run the stream stages in parallel (using [[gears.async.Future]]s) and communicate the elements through a
+    * ([[gears.async.stream.StreamChannel]]).
+    *
+    * @param bufferSize
+    *   the size of the channel that is used for sending the elements over the asynchronous boundary
+    * @param parallelism
+    *   the level of parallelism (number of threads/futures) applied to the downstream stages
+    * @return
+    *   a stream of the same elements as this stream but with all following computation run asynchronously
+    */
+  def parallel(bufferSize: Int, parallelism: Int): ThisStream[T]
+
   // conversion methods
 
   extension [V](ts: Stream[V])
@@ -147,3 +161,11 @@ trait Stream[+T]:
     */
   def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T]
 end Stream
+
+object Stream:
+  extension [T](s: Stream[T])
+    /** @see
+      *   [[Stream.parallel(bufferSize:Int*]]
+      */
+    inline def parallel(inline parallelism: Int)(using inline size: BufferedStreamChannel.Size): s.ThisStream[T] =
+      s.parallel(size.asInt, parallelism = parallelism)

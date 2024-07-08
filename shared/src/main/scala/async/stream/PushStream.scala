@@ -51,6 +51,10 @@ trait PushSenderStream[+T] extends PushChannelStream[T] with Stream[T]:
   override def flatMap[V](outerParallelism: Int)(mapper: T => PushSenderStream[V]): PushSenderStream[V] =
     new PushLayers.FlatMapLayer.SenderMixer[T, V](mapper, outerParallelism, this)
 
+  override def parallel(bufferSize: Int, parallelism: Int): PushSenderStream[T] =
+    // the parallelization hint of the intermediate pull stream is ignored b/c an explicit parameter is passed to toPushStream
+    pulledThrough(bufferSize).toPushStream(parallelism)
+
   override def toPushStream(): PushSenderStream[T] = this
   override def toPushStream(parallelism: Int): PushSenderStream[T] = this
   override def toPullStream()(using size: BufferedStreamChannel.Size): PullReaderStream[T] = pulledThrough(size.asInt)
@@ -78,13 +82,15 @@ trait PushChannelStream[+T]:
     *
     * @param bufferSize
     *   the size of the buffer of the channel
+    * @param parHint
+    *   the internal parallelization hint for the returned pull stream
     * @return
     *   a new pull stream where the elements that this push stream produces can be read from
     * @see
     *   BufferedStreamChannel
     */
-  def pulledThrough(bufferSize: Int): PullChannelStream[T] = new PullChannelStream[T]:
-    override def parallelismHint: Int = 1
+  def pulledThrough(bufferSize: Int, parHint: Int = 1): PullChannelStream[T] = new PullChannelStream[T]:
+    override def parallelismHint: Int = parHint
     override def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]] =
       Resource.spawning:
         val channel = BufferedStreamChannel[T](bufferSize)
