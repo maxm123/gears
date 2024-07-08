@@ -62,8 +62,6 @@ trait PullReaderStream[+T]:
   def fold(parallelism: Int, folder: StreamFolder[T])(using Async): Try[folder.Container] =
     require(parallelism > 0)
 
-    val ref = AtomicReference[Option[folder.Container]](None)
-
     def read(reader: StreamReader[T])(using Async): folder.Container =
       var container = folder.create()
       val handle = reader.pull(item => { container = folder.add(container, item); true })
@@ -75,9 +73,6 @@ trait PullReaderStream[+T]:
 
       container
 
-    def readAndMerge(reader: StreamReader[T])(using Async): Unit =
-      StreamFolder.mergeAll(folder, read(reader), ref)
-
     try
       this
         .toReader(parallelism)
@@ -87,11 +82,12 @@ trait PullReaderStream[+T]:
             Success(read(r))
           else
             Async.group:
+              val ref = AtomicReference[Option[folder.Container]](None)
               handleMaybeIt(readers)(Iterator.continually)(identity)
                 .take(parallelism)
-                .map(reader => Future(readAndMerge(reader)))
+                .map(reader => Future(StreamFolder.mergeAll(folder, read(reader), ref)))
                 .foreach(_.await)
-            Success(ref.get().get)
+              Success(ref.get().get)
     catch case e: StreamResult.StreamTerminatedException => Failure(e.getCause())
   end fold
 
@@ -611,6 +607,5 @@ private object PullLayers:
               SingleStreamContext(_, outerParallelism, innerParallelism, mapper)
             )(IteratorStreamContext(_, outerParallelism, innerParallelism, mapper))
             Resource(Iterator.continually(ReaderLayer(context)), { _ => context.cancelAll() })
-
   end FlatMapLayer
 end PullLayers

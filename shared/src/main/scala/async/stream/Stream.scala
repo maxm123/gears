@@ -8,8 +8,12 @@ trait StreamFolder[-T]:
   def add(c: Container, item: T): Container
   def merge(c1: Container, c2: Container): Container
 
-private[stream] object StreamFolder:
-  def mergeAll(folder: StreamFolder[_], container: folder.Container, ref: AtomicReference[Option[folder.Container]]) =
+object StreamFolder:
+  private[stream] def mergeAll(
+      folder: StreamFolder[_],
+      container: folder.Container,
+      ref: AtomicReference[Option[folder.Container]]
+  ) =
     var current = container
     var possessing = true
     while possessing do

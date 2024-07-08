@@ -326,7 +326,8 @@ private object PushLayers:
       override protected def getInner(): StreamSenderWrapper[V] = StreamSenderWrapper(sender)
       // the overhead of managing a queue seems to be larger than just creating one new wrapper per inner stream
       override protected def yieldInner(sender: StreamSenderWrapper[V]): Unit =
-        sender.clearTermination() // used to bubble up exception
+        val throwable = sender.clearTermination()
+        if throwable != null then throw StreamResult.StreamTerminatedException(throwable)
 
       override def closeInner(): Unit = sender.terminate(termination)
 
@@ -364,9 +365,9 @@ private object PushLayers:
 
       override protected def getInner(): WrapperIterator = WrapperIterator()
       override protected def yieldInner(senders: WrapperIterator): Unit =
+        val throwable = senders.acquired.map(_.clearTermination()).find(_ != null)
         senders.acquired.foreach(pool.add)
-        // add all first because the following can throw
-        senders.acquired.foreach(_.clearTermination())
+        throwable.foreach(cause => throw StreamResult.StreamTerminatedException(cause))
 
       override def closeInner(): Unit =
         val t: StreamResult.Done = termination
@@ -392,10 +393,10 @@ private object PushLayers:
 
         didTerminate
 
-      def clearTermination() =
-        if termination != null && termination.isInstanceOf[Throwable] then
-          throw StreamResult.StreamTerminatedException(termination.asInstanceOf[Throwable])
+      def clearTermination(): Throwable =
+        if termination != null && termination.isInstanceOf[Throwable] then return termination.asInstanceOf[Throwable]
         termination = null
+        null
     end StreamSenderWrapper
 
     class SenderMixer[T, V](mapper: T => PushSenderStream[V], outerParallelism: Int, upstream: PushSenderStream[T])
