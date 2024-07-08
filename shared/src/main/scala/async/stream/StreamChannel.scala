@@ -1,20 +1,22 @@
 package gears.async.stream
 
+import gears.async.Async
 import gears.async.Channel
-import gears.async.SendableChannel
+import gears.async.Channel.Res
+import gears.async.ChannelSender
+import gears.async.Listener
 import gears.async.ReadableChannel
+import gears.async.SendableChannel
+import gears.async.SourceUtil
+
 import java.util.concurrent.locks.ReadWriteLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
-import gears.async.Listener
-import gears.async.Channel.Res
-import gears.async.Async
-import gears.async.SourceUtil
-import scala.util.Try
-import scala.util.Success
 import scala.util.Failure
-import gears.async.ChannelSender
-import StreamResult.StreamResult
+import scala.util.Success
+import scala.util.Try
 import scala.util.boundary
+
+import StreamResult.StreamResult
 
 /** This object groups the types and exceptions used used to communicate stream termination from upstream to downstream
   * and vice-versa. Towards downstream, termination is ordered as argument or indicated as return value ([[Done]]).
@@ -311,6 +313,10 @@ class GenericStreamChannel[T](private val channel: Channel[StreamResult[T]]) ext
 end GenericStreamChannel
 
 object BufferedStreamChannel:
+  opaque type Size = Int
+  inline def size(size: Int): Size = size
+  extension (s: Size) inline def asInt: Int = s
+
   /** Create a [[StreamChannel]] operating on an internal buffer. It works exactly like [[BufferedChannel]] except for
     * the termination behavior of [[StreamChannel]]s.
     *

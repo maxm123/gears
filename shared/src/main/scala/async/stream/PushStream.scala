@@ -25,7 +25,9 @@ import scala.util.Try
   */
 type PushDestination[+S[-_], -T] = S[T] | Iterator[S[T]]
 
-trait PushSenderStream[+T] extends PushChannelStream[T]:
+trait PushSenderStream[+T] extends PushChannelStream[T] with Stream[T]:
+  override type ThisStream[+V] = PushSenderStream[V]
+
   def runToSender(sender: PushDestination[StreamSender, T])(using Async): Unit
 
   override def runToChannel(channel: PushDestination[SendableStreamChannel, T])(using Async): Unit =
@@ -46,8 +48,17 @@ trait PushSenderStream[+T] extends PushChannelStream[T]:
       with PushLayers.TakeLayer.TakeLayer(count)
       with PushLayers.FromSenderLayer(this)
 
-  def flatMap[V](outerParallelism: Int)(mapper: T => PushSenderStream[V]): PushSenderStream[V] =
+  override def flatMap[V](outerParallelism: Int)(mapper: T => PushSenderStream[V]): PushSenderStream[V] =
     new PushLayers.FlatMapLayer.SenderMixer[T, V](mapper, outerParallelism, this)
+
+  override def toPushStream(): PushSenderStream[T] = this
+  override def toPushStream(parallelism: Int): PushSenderStream[T] = this
+  override def toPullStream()(using size: BufferedStreamChannel.Size): PullReaderStream[T] = pulledThrough(size.asInt)
+
+  extension [V](ts: Stream[V])
+    override def adapt()(using BufferedStreamChannel.Size): PushSenderStream[V] = ts.toPushStream()
+    override def adapt(parallelism: Int)(using BufferedStreamChannel.Size): PushSenderStream[V] =
+      ts.toPushStream(parallelism)
 
 trait PushChannelStream[+T]:
   def runToChannel(channel: PushDestination[SendableStreamChannel, T])(using Async): Unit
@@ -73,6 +84,7 @@ trait PushChannelStream[+T]:
     *   BufferedStreamChannel
     */
   def pulledThrough(bufferSize: Int): PullChannelStream[T] = new PullChannelStream[T]:
+    override def parallelismHint: Int = 1
     override def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]] =
       Resource.spawning:
         val channel = BufferedStreamChannel[T](bufferSize)
