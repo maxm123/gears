@@ -1,9 +1,11 @@
 package gears.async.stream
 
 import gears.async.Async
+import gears.async.Resource
 
 import java.util.concurrent.atomic.AtomicReference
 import scala.annotation.targetName
+import scala.collection.immutable.HashMap
 import scala.util.Try
 
 trait StreamFolder[-T]:
@@ -28,6 +30,21 @@ object StreamFolder:
         ref.getAndSet(None) match
           case Some(value) => current = folder.merge(current, value)
           case None        => () // retry
+
+  def toMap[T, K, V](
+      key: T => K,
+      value: T => V,
+      combine: (K, V, V) => V
+  ): StreamFolder[T] { type Container = HashMap[K, V] } =
+    new StreamFolder[T] {
+      type Container = HashMap[K, V]
+      def create(): Container = HashMap()
+      def add(c: HashMap[K, V], item: T): Container =
+        val theKey = key(item)
+        c.updatedWith(theKey)(_.map(prev => combine(theKey, prev, value(item))).orElse(Some(value(item))))
+      def merge(c1: HashMap[K, V], c2: HashMap[K, V]): Container =
+        c1.merged(c2) { case ((k, v1), (_, v2)) => (k, combine(k, v1, v2)) }
+    }
 
 private[stream] inline def handleMaybeIt[S[_], T, V](
     source: S[T] | Iterator[S[T]]
@@ -169,3 +186,31 @@ object Stream:
       */
     inline def parallel(inline parallelism: Int)(using inline size: BufferedStreamChannel.Size): s.ThisStream[T] =
       s.parallel(size.asInt, parallelism = parallelism)
+
+  private class ArrayStreamReader[A](a: Array[A], var pos: Int, end: Int) extends StreamReader[A]:
+    override def pull(onItem: A => (Async) ?=> Boolean): StreamPull = () =>
+      while pos < end && !onItem(a(pos)) do pos += 1
+      if pos < end then
+        pos += 1 // after onItem returned true, the loop body is not evaluated -> increase now
+        None
+      else Some(StreamResult.Closed)
+
+    override def readStream()(using Async): StreamResult.StreamResult[A] =
+      if pos < end then
+        pos += 1
+        Right(a(pos - 1))
+      else Left(StreamResult.Closed)
+
+  def fromArray[A](a: Array[A]): PullReaderStream[A] = new PullReaderStream[A]:
+    override def parallelismHint: Int = 1
+    override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, A]] = Resource(
+      {
+        val effectiveParallelism = parallelism.min(a.size) // TODO better limit
+        val step = Math.ceilDiv(a.size, effectiveParallelism)
+        Iterator
+          .from(0, step)
+          .take(effectiveParallelism)
+          .map(start => new ArrayStreamReader(a, start, (start + step).min(a.size)))
+      },
+      _ => ()
+    )
