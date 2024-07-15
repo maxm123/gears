@@ -41,7 +41,7 @@ trait PullReaderStream[+T] extends Stream[T]:
     * @return
     *   the resource that wraps the stream readers
     */
-  def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, T]]
+  def toReader(parallelism: Int): Resource[PullSource[StreamReader, T]]
 
   /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the
     * user does not specify a pull parallelism level explicitly.
@@ -189,8 +189,8 @@ trait PullChannelStream[+T] extends PullReaderStream[T]:
   /** @see
     *   PullReaderStream.toReader
     */
-  def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]]
-  override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, T]] = toChannel(parallelism)
+  def toChannel(parallelism: Int): Resource[PullSource[ReadableStreamChannel, T]]
+  override def toReader(parallelism: Int): Resource[PullSource[StreamReader, T]] = toChannel(parallelism)
 
   // These methods do not override their PullReaderStream correspondents because some implementations add an overhead
   // that should not implicitly be added unless the programmer requires the full channel access.
@@ -225,14 +225,14 @@ private object PullLayers:
     self: FromReaderLayer[T] =>
     def transform(reader: StreamReader[T]): StreamReader[V]
     override def parallelismHint: Int = upstream.parallelismHint
-    override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, V]] =
+    override def toReader(parallelism: Int): Resource[PullSource[StreamReader, V]] =
       upstream.toReader(parallelism).map(mapMaybeIt(_)(transform))
 
   trait ChannelMixer[T, V] extends PullChannelStream[V]:
     self: FromChannelLayer[T] =>
     def transform(channel: ReadableStreamChannel[T]): ReadableStreamChannel[V]
     override def parallelismHint: Int = upstream.parallelismHint
-    override def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, V]] =
+    override def toChannel(parallelism: Int): Resource[PullSource[ReadableStreamChannel, V]] =
       upstream.toChannel(parallelism).map(mapMaybeIt(_)(transform))
 
   object MapLayer:
@@ -398,7 +398,7 @@ private object PullLayers:
     trait ReaderMixer[T] extends PullReaderStream[T]:
       self: FromReaderLayer[T] with TakeLayer =>
       override def parallelismHint: Int = upstream.parallelismHint
-      override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, T]] =
+      override def toReader(parallelism: Int): Resource[PullSource[StreamReader, T]] =
         val remaining = AtomicInteger(count)
         upstream
           .toReader(parallelism)
@@ -407,7 +407,7 @@ private object PullLayers:
     trait ChannelMixer[T] extends PullChannelStream[T]:
       self: FromChannelLayer[T] with TakeLayer =>
       override def parallelismHint: Int = upstream.parallelismHint
-      override def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]] =
+      override def toChannel(parallelism: Int): Resource[PullSource[ReadableStreamChannel, T]] =
         val counter = ChannelCounter(count)
         val lock = ReentrantLock()
         upstream
@@ -631,7 +631,7 @@ private object PullLayers:
     class ReaderMixer[T, V](upstream: PullReaderStream[T], outerParallelism: Int, mapper: T => PullReaderStream[V])
         extends PullReaderStream[V]:
       override def parallelismHint: Int = upstream.parallelismHint.max(outerParallelism)
-      override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, V]] =
+      override def toReader(parallelism: Int): Resource[PullSource[StreamReader, V]] =
         val effectiveOuter = outerParallelism.min(parallelism)
         upstream
           .toReader(effectiveOuter)

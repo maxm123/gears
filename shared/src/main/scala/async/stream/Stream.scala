@@ -203,7 +203,7 @@ object Stream:
 
   def fromArray[A](a: Array[A]): PullReaderStream[A] = new PullReaderStream[A]:
     override def parallelismHint: Int = 1
-    override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, A]] = Resource(
+    override def toReader(parallelism: Int): Resource[PullSource[StreamReader, A]] = Resource(
       {
         val effectiveParallelism = parallelism.min(a.size) // TODO better limit
         val step = Math.ceilDiv(a.size, effectiveParallelism)

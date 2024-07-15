@@ -91,7 +91,7 @@ trait PushChannelStream[+T]:
     */
   def pulledThrough(bufferSize: Int, parHint: Int = 1): PullChannelStream[T] = new PullChannelStream[T]:
     override def parallelismHint: Int = parHint
-    override def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]] =
+    override def toChannel(parallelism: Int): Resource[PullSource[ReadableStreamChannel, T]] =
       Resource.spawning:
         val channel = BufferedStreamChannel[T](bufferSize)
 
