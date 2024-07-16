@@ -6,33 +6,29 @@ import gears.async.Resource
 sealed trait StreamType
 object SEmpty extends StreamType
 type SEmpty = SEmpty.type
-sealed abstract class **:[+T[_ <: StreamType.StreamPos, _], S <: StreamType] extends StreamType
+sealed abstract class **:[+T[_ <: StreamType.StreamPos], S <: StreamType] extends StreamType
 
 object StreamType:
-  type ForPos[X <: StreamPos, T <: StreamType, U <: Tuple] <: Tuple = T match
-    case SEmpty =>
-      U match
-        case EmptyTuple => EmptyTuple
-    case t **: s =>
-      U match
-        case a *: ua => t[X, a] *: ForPos[X, s, ua]
+  type ForPos[X <: StreamPos, T <: StreamType] <: Tuple = T match
+    case SEmpty  => EmptyTuple
+    case t **: s => t[X] *: ForPos[X, s]
 
-  sealed trait StreamPos
-  object StreamIn extends StreamPos
-  type StreamIn = StreamIn.type
-  object StreamOut extends StreamPos
-  type StreamOut = StreamOut.type
+  enum StreamPos:
+    case StreamIn
+    case StreamOut
+  type StreamIn = StreamPos.StreamIn.type
+  type StreamOut = StreamPos.StreamOut.type
 
-  type Push[S[-_]] = [T <: StreamPos, A] =>> T match
+  type Push[S[-_]] = [A] =>> [T <: StreamPos] =>> T match
     case StreamIn  => PushDestination[S, A]
     case StreamOut => Unit
 
-  type PushSender[T <: StreamPos, A] = Push[StreamSender][T, A]
-  type PushChannel[T <: StreamPos, A] = Push[SendableStreamChannel][T, A]
-
-  type Pull[S[+_]] = [T <: StreamPos, A] =>> T match
+  type Pull[S[+_]] = [A] =>> [T <: StreamPos] =>> T match
     case StreamIn  => Unit
     case StreamOut => PullSource[S, A]
 
-  type PullReader[T <: StreamPos, A] = Pull[StreamReader][T, A]
-  type PullChannel[T <: StreamPos, A] = Pull[ReadableStreamChannel][T, A]
+  type PushSender = [A] =>> [T <: StreamPos] =>> Push[StreamSender][A][T]
+  type PushChannel = [A] =>> [T <: StreamPos] =>> Push[SendableStreamChannel][A][T]
+
+  type PullReader = [A] =>> [T <: StreamPos] =>> Pull[StreamReader][A][T]
+  type PullChannel = [A] =>> [T <: StreamPos] =>> Pull[ReadableStreamChannel][A][T]
