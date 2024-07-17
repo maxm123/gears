@@ -29,8 +29,10 @@ import scala.util.Try
   */
 type PullSource[+S[+_], +T] = S[T] | Iterator[S[T]]
 
-trait PullReaderStream[+T] extends Stream[T]:
+trait PullReaderStream[+T] extends PullReaderStreamOps[T] with Stream[T]:
   override type ThisStream[+V] = PullReaderStream[V]
+  override type Result[+V] = Async ?=> V
+  override type SenderType[+V] = PushSenderStream[V]
 
   /** Create a resource of readers that can be used to retrieve the stream data. The stream can use this function to set
     * up, but asynchronous tasks and item processing should (and can) only be started when the returned resource is
@@ -42,14 +44,6 @@ trait PullReaderStream[+T] extends Stream[T]:
     *   the resource that wraps the stream readers
     */
   def toReader(parallelism: Int): Resource[PullSource[StreamReader, T]]
-
-  /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the
-    * user does not specify a pull parallelism level explicitly.
-    *
-    * @return
-    *   a hint on the number of threads that could/should be used to pull this stream
-    */
-  def parallelismHint: Int
 
   override def map[V](mapper: T => V): PullReaderStream[V] =
     new PullLayers.MapLayer.ReaderMixer[T, V]
@@ -69,13 +63,7 @@ trait PullReaderStream[+T] extends Stream[T]:
   override def flatMap[V](outerParallelism: Int)(mapper: T => PullReaderStream[V]): PullReaderStream[V] =
     new PullLayers.FlatMapLayer.ReaderMixer(this, outerParallelism, mapper)
 
-  /** @see
-    *   [[Stream.fold]]
-    *
-    * @param parallelism
-    *   the number of threads (futures) that are employed to concurrently pull this stream
-    */
-  def fold(parallelism: Int, folder: StreamFolder[T])(using Async): Try[folder.Container] =
+  override def fold(parallelism: Int, folder: StreamFolder[T]): Result[Try[folder.Container]] =
     require(parallelism > 0)
 
     def read(reader: StreamReader[T])(using Async): folder.Container =
@@ -112,28 +100,15 @@ trait PullReaderStream[+T] extends Stream[T]:
     //  -> set as parallelismHint for new stream and use this streams parallelismHint for pulling this stream
     toPushStream(parallelismHint).pulledThrough(bufferSize, parallelism)
 
-  override def fold(folder: StreamFolder[T])(using Async): Try[folder.Container] = fold(parallelismHint, folder)
   override def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T] = this
-  override def toPushStream(): PushSenderStream[T] = toPushStream(parallelismHint)
 
   extension [V](ts: Stream[V])
     override def adapt()(using BufferedStreamChannel.Size): PullReaderStream[V] = ts.toPullStream()
     override def adapt(parallelism: Int)(using BufferedStreamChannel.Size): PullReaderStream[V] = ts.toPullStream()
 
-  /** Transform this pull stream into a push stream by introducing an active component that pulls items, possibly
-    * transforms them, and pushes them downstream. On successful completion, the sender is closed automatically, unless
-    * the task throws (any exception), in which case it is itself responsible for closing the passed sender.
-    *
-    * @param parallelism
-    *   The number of task instances that are spawned. The actual number may be limited by sender/reader capabilities.
-    * @param task
-    *   The task to operate on the reader (to pull from this stream) and the sender which consumes the created stream's
-    *   output. It may throw a [[StreamResult.StreamTerminatedException]] to stop parallel executions of the same task
-    *   without further side effects. Any other exception will cancel (parallel) execution and bubble up.
-    * @return
-    *   a new push stream where elements emitted by the task will be sent to
-    */
-  def pushedBy[V](parallelism: Int)(task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit): PushSenderStream[V] =
+  override def pushedBy[V](parallelism: Int)(
+      task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit
+  ): PushSenderStream[V] =
     require(parallelism > 0)
     new PushSenderStream[V]:
       override def runToSender(senders: PushDestination[StreamSender, V])(using Async): Unit =
@@ -165,8 +140,48 @@ trait PullReaderStream[+T] extends Stream[T]:
                 futureIterator.foreach(_.await)
               if theSingle != null then theSingle.close()
           catch case _: StreamResult.StreamTerminatedException => {} // main goal: to cancel Async.group
+end PullReaderStream
 
-  override def toPushStream(parallelism: Int): PushSenderStream[T] = pushedBy(parallelism): (reader, sender) =>
+trait PullReaderStreamOps[+T] extends StreamOps[T]:
+  self =>
+  override type ThisStream[+V] <: PullReaderStreamOps[V] { type Result[T] = self.Result[T] }
+  type SenderType[+V] <: PushSenderStreamOps[V]
+
+  /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the
+    * user does not specify a pull parallelism level explicitly.
+    *
+    * @return
+    *   a hint on the number of threads that could/should be used to pull this stream
+    */
+  def parallelismHint: Int
+
+  /** @see
+    *   [[Stream.fold]]
+    *
+    * @param parallelism
+    *   the number of threads (futures) that are employed to concurrently pull this stream
+    */
+  def fold(parallelism: Int, folder: StreamFolder[T]): Result[Try[folder.Container]]
+
+  override def fold(folder: StreamFolder[T]): Result[Try[folder.Container]] = fold(parallelismHint, folder)
+
+  /** Transform this pull stream into a push stream by introducing an active component that pulls items, possibly
+    * transforms them, and pushes them downstream. On successful completion, the sender is closed automatically, unless
+    * the task throws (any exception), in which case it is itself responsible for closing the passed sender.
+    *
+    * @param parallelism
+    *   The number of task instances that are spawned. The actual number may be limited by sender/reader capabilities.
+    * @param task
+    *   The task to operate on the reader (to pull from this stream) and the sender which consumes the created stream's
+    *   output. It may throw a [[StreamResult.StreamTerminatedException]] to stop parallel executions of the same task
+    *   without further side effects. Any other exception will cancel (parallel) execution and bubble up.
+    * @return
+    *   a new push stream where elements emitted by the task will be sent to
+    */
+  def pushedBy[V](parallelism: Int)(task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit): SenderType[V]
+
+  override def toPushStream(): SenderType[T] = toPushStream(parallelismHint)
+  override def toPushStream(parallelism: Int): SenderType[T] = pushedBy(parallelism): (reader, sender) =>
     val handle = reader.pull(it => { sender.send(it); true })
     var result: Option[StreamResult.Done] = None
 
@@ -184,6 +199,7 @@ trait PullReaderStream[+T] extends Stream[T]:
           if res.isInstanceOf[Throwable] then throw StreamResult.StreamTerminatedException(res.asInstanceOf[Throwable])
           else throw StreamResult.StreamTerminatedException() // terminated
     catch case _: ChannelClosedException => {} // case (2A) --> just stop silently, but case (2B) goes up to interrupt
+end PullReaderStreamOps
 
 trait PullChannelStream[+T] extends PullReaderStream[T]:
   /** @see

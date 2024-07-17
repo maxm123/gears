@@ -25,8 +25,9 @@ import scala.util.Try
   */
 type PushDestination[+S[-_], -T] = S[T] | Iterator[S[T]]
 
-trait PushSenderStream[+T] extends PushChannelStream[T] with Stream[T]:
+trait PushSenderStream[+T] extends PushChannelStream[T] with PushSenderStreamOps[T] with Stream[T]:
   override type ThisStream[+V] = PushSenderStream[V]
+  override type Result[+V] = Async ?=> V
 
   def runToSender(sender: PushDestination[StreamSender, T])(using Async): Unit
 
@@ -63,19 +64,11 @@ trait PushSenderStream[+T] extends PushChannelStream[T] with Stream[T]:
     override def adapt()(using BufferedStreamChannel.Size): PushSenderStream[V] = ts.toPushStream()
     override def adapt(parallelism: Int)(using BufferedStreamChannel.Size): PushSenderStream[V] =
       ts.toPushStream(parallelism)
+end PushSenderStream
 
-trait PushChannelStream[+T]:
-  def runToChannel(channel: PushDestination[SendableStreamChannel, T])(using Async): Unit
-
-  def map[V](mapper: T => V): PushChannelStream[V] =
-    new PushLayers.MapLayer.ChannelMixer[T, V]
-      with PushLayers.MapLayer.MapLayer(mapper)
-      with PushLayers.FromChannelLayer(this)
-
-  def filter(test: T => Boolean): PushChannelStream[T] =
-    new PushLayers.FilterLayer.ChannelMixer[T]
-      with PushLayers.FilterLayer.FilterLayer(test)
-      with PushLayers.FromChannelLayer(this)
+trait PushSenderStreamOps[+T] extends StreamOps[T]:
+  self =>
+  override type ThisStream[+V] <: PushSenderStreamOps[V] { type Result[T] = self.Result[T] }
 
   /** Transform this push stream into a pull stream by creating an intermediary stream channel where all elements flow
     * through. This stream will be started asynchronously to run the pulling body synchronously.
@@ -88,6 +81,27 @@ trait PushChannelStream[+T]:
     *   a new pull stream where the elements that this push stream produces can be read from
     * @see
     *   BufferedStreamChannel
+    */
+  def pulledThrough(bufferSize: Int, parHint: Int = 1): PullReaderStreamOps[T]
+end PushSenderStreamOps
+
+trait PushChannelStream[+T]:
+  type Result[+V] = Async ?=> V
+
+  def runToChannel(channel: PushDestination[SendableStreamChannel, T])(using Async): Unit
+
+  def map[V](mapper: T => V): PushChannelStream[V] =
+    new PushLayers.MapLayer.ChannelMixer[T, V]
+      with PushLayers.MapLayer.MapLayer(mapper)
+      with PushLayers.FromChannelLayer(this)
+
+  def filter(test: T => Boolean): PushChannelStream[T] =
+    new PushLayers.FilterLayer.ChannelMixer[T]
+      with PushLayers.FilterLayer.FilterLayer(test)
+      with PushLayers.FromChannelLayer(this)
+
+  /** @see
+    *   [[PushSenderStreamOps.pulledThrough]]
     */
   def pulledThrough(bufferSize: Int, parHint: Int = 1): PullChannelStream[T] = new PullChannelStream[T]:
     override def parallelismHint: Int = parHint
@@ -106,7 +120,7 @@ trait PushChannelStream[+T]:
       with PushLayers.TakeLayer.TakeLayer(count)
       with PushLayers.FromChannelLayer(this)
 
-  def fold(folder: StreamFolder[T])(using Async): Try[folder.Container] =
+  def fold(folder: StreamFolder[T]): Result[Try[folder.Container]] =
     val ref = AtomicReference[Option[folder.Container]](None)
 
     class Sender extends SendableStreamChannel[T]:
