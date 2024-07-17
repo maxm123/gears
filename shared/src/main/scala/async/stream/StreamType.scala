@@ -9,9 +9,11 @@ type SEmpty = SEmpty.type
 sealed abstract class **:[+T[_ <: StreamType.StreamPos], S <: StreamType] extends StreamType
 
 object StreamType:
-  type ForPos[X <: StreamPos, T <: StreamType] <: Tuple = T match
+  type Applied[A[T[_ <: StreamType.StreamPos]], T <: StreamType] <: Tuple = T match
     case SEmpty  => EmptyTuple
-    case t **: s => t[X] *: ForPos[X, s]
+    case t **: s => A[t] *: Applied[A, s]
+
+  type ForPos[X <: StreamPos, T <: StreamType] = Applied[[T[_ <: StreamPos]] =>> T[X], T]
 
   enum StreamPos:
     case StreamIn
