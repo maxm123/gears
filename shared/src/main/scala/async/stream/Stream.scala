@@ -56,9 +56,24 @@ private[stream] inline def mapMaybeIt[S[_], T, V](source: S[T] | Iterator[S[T]])
   handleMaybeIt(source)(single)(_.map(single))
 
 trait StreamOps[+T]:
-  self =>
-  type ThisStream[+V] <: StreamOps[V] { type Result[T] = self.Result[T] }
+  self: Family[T] =>
+
+  type Family[+V]
+  type ThisStream[+V] <: StreamOps[V] {
+    type Family[T] = self.Family[T]
+    type Result[T] = self.Result[T]
+  }
   type Result[+V]
+
+  type PushType[+V] <: PushSenderStreamOps[V] {
+    type Family[T] = self.Family[T]
+    type Result[T] = self.Result[T]
+  }
+
+  type PullType[+V] <: PullReaderStreamOps[V] {
+    type Family[T] = self.Family[T]
+    type Result[T] = self.Result[T]
+  }
 
   /** Transform elements of this stream one by one
     *
@@ -131,7 +146,7 @@ trait StreamOps[+T]:
     * @see
     *   [[toPushStream(parallelism:Int)]]
     */
-  def toPushStream(): PushSenderStreamOps[T]
+  def toPushStream(): PushType[T]
 
   /** Convert this stream to a push stream, possibly requiring a new active (possibly thread-spawning) component. The
     * parallelism of pulling and pushing is explicitly specified. Note that this will be ignored if this stream is
@@ -142,7 +157,7 @@ trait StreamOps[+T]:
     * @return
     *   a stream pushing the elements of this stream, or this if it already is a push stream
     */
-  def toPushStream(parallelism: Int): PushSenderStreamOps[T]
+  def toPushStream(parallelism: Int): PushType[T]
 
   /** Convert this stream to a pull stream, possibly decoupling the stream consumer the from the sender through
     * concurrency and introduction of a channel. The size of that channel is taken from the context parameter. Note that
@@ -151,10 +166,15 @@ trait StreamOps[+T]:
     * @return
     *   a stream from which the elements of this stream can be pulled
     */
-  def toPullStream()(using BufferedStreamChannel.Size): PullReaderStreamOps[T]
+  def toPullStream()(using BufferedStreamChannel.Size): PullType[T]
 end StreamOps
 
 trait Stream[+T] extends StreamOps[T]:
+  override type Family[T] = Any
+  override type Result[T] = Async ?=> T
+  override type PushType[T] = PushSenderStream[T]
+  override type PullType[T] = PullReaderStream[T]
+
   extension [V](ts: Stream[V])
     /** Convert this stream to a stream matching the [[ThisStream]] type. The transformation depends on both stream
       * types. It can be a no-op, introduce an active component (push) or a channel (pull).
@@ -179,10 +199,6 @@ trait Stream[+T] extends StreamOps[T]:
       *   a stream of correct type, possibly transformed, possibly itself
       */
     def adapt(parallelism: Int)(using BufferedStreamChannel.Size): ThisStream[V]
-
-  override def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T]
-  override def toPushStream(): PushSenderStream[T]
-  override def toPushStream(parallelism: Int): PushSenderStream[T]
 end Stream
 
 object Stream:

@@ -31,8 +31,6 @@ type PullSource[+S[+_], +T] = S[T] | Iterator[S[T]]
 
 trait PullReaderStream[+T] extends PullReaderStreamOps[T] with Stream[T]:
   override type ThisStream[+V] = PullReaderStream[V]
-  override type Result[+V] = Async ?=> V
-  override type SenderType[+V] = PushSenderStream[V]
 
   /** Create a resource of readers that can be used to retrieve the stream data. The stream can use this function to set
     * up, but asynchronous tasks and item processing should (and can) only be started when the returned resource is
@@ -143,9 +141,12 @@ trait PullReaderStream[+T] extends PullReaderStreamOps[T] with Stream[T]:
 end PullReaderStream
 
 trait PullReaderStreamOps[+T] extends StreamOps[T]:
-  self =>
-  override type ThisStream[+V] <: PullReaderStreamOps[V] { type Result[T] = self.Result[T] }
-  type SenderType[+V] <: PushSenderStreamOps[V]
+  self: Family[T] =>
+  override type ThisStream[+V] <: PullReaderStreamOps[V] {
+    type Family[T] = self.Family[T]
+    type Result[T] = self.Result[T]
+  }
+  override type PullType[+V] = ThisStream[V]
 
   /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the
     * user does not specify a pull parallelism level explicitly.
@@ -178,10 +179,10 @@ trait PullReaderStreamOps[+T] extends StreamOps[T]:
     * @return
     *   a new push stream where elements emitted by the task will be sent to
     */
-  def pushedBy[V](parallelism: Int)(task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit): SenderType[V]
+  def pushedBy[V](parallelism: Int)(task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit): PushType[V]
 
-  override def toPushStream(): SenderType[T] = toPushStream(parallelismHint)
-  override def toPushStream(parallelism: Int): SenderType[T] = pushedBy(parallelism): (reader, sender) =>
+  override def toPushStream(): PushType[T] = toPushStream(parallelismHint)
+  override def toPushStream(parallelism: Int): PushType[T] = pushedBy(parallelism): (reader, sender) =>
     val handle = reader.pull(it => { sender.send(it); true })
     var result: Option[StreamResult.Done] = None
 
