@@ -58,22 +58,16 @@ private[stream] inline def mapMaybeIt[S[_], T, V](source: S[T] | Iterator[S[T]])
 trait StreamOps[+T]:
   self: Family[T] =>
 
-  type Family[+V]
-  type ThisStream[+V] <: StreamOps[V] {
-    type Family[T] = self.Family[T]
-    type Result[T] = self.Result[T]
-  }
-  type Result[+V]
+  /** A type that will be inhabited by all streams derived from this one (including pushed/pulled streams)
+    */
+  type Family[+V] <: { type Result[+W] }
 
-  type PushType[+V] <: PushSenderStreamOps[V] {
-    type Family[T] = self.Family[T]
-    type Result[T] = self.Result[T]
-  }
-
-  type PullType[+V] <: PullReaderStreamOps[V] {
-    type Family[T] = self.Family[T]
-    type Result[T] = self.Result[T]
-  }
+  /** The more specific type of this stream that all streams of the same push/pull characteristic inhabit. Will usually
+    * be either [[PushType]] or [[PullType]] depending on this stream's type.
+    */
+  type ThisStream[+V] <: StreamOps[V] { type Family[T] = self.Family[T] }
+  type PushType[+V] <: PushSenderStreamOps[V] { type Family[T] = self.Family[T] }
+  type PullType[+V] <: PullReaderStreamOps[V] { type Family[T] = self.Family[T] }
 
   /** Transform elements of this stream one by one
     *
@@ -170,8 +164,8 @@ trait StreamOps[+T]:
 end StreamOps
 
 trait Stream[+T] extends StreamOps[T]:
-  override type Family[T] = Any
-  override type Result[T] = Async ?=> T
+  type Result[+V] = Async ?=> V
+  override type Family[T] = Object { type Result[+V] = Async ?=> V }
   override type PushType[T] = PushSenderStream[T]
   override type PullType[T] = PullReaderStream[T]
 

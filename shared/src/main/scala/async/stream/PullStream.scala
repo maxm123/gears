@@ -142,10 +142,7 @@ end PullReaderStream
 
 trait PullReaderStreamOps[+T] extends StreamOps[T]:
   self: Family[T] =>
-  override type ThisStream[+V] <: PullReaderStreamOps[V] {
-    type Family[T] = self.Family[T]
-    type Result[T] = self.Result[T]
-  }
+  override type ThisStream[+V] <: PullReaderStreamOps[V] { type Family[T] = self.Family[T] }
   override type PullType[+V] = ThisStream[V]
 
   /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the

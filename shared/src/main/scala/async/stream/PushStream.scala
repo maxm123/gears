@@ -66,10 +66,7 @@ end PushSenderStream
 
 trait PushSenderStreamOps[+T] extends StreamOps[T]:
   self: Family[T] =>
-  override type ThisStream[+V] <: PushSenderStreamOps[V] {
-    type Family[T] = self.Family[T]
-    type Result[T] = self.Result[T]
-  }
+  override type ThisStream[+V] <: PushSenderStreamOps[V] { type Family[T] = self.Family[T] }
   override type PushType[+V] = ThisStream[V]
 
   override def toPullStream()(using size: BufferedStreamChannel.Size) = pulledThrough(size.asInt)
