@@ -29,7 +29,7 @@ import scala.util.Try
   */
 type PullSource[+S[+_], +T] = S[T] | Iterator[S[T]]
 
-trait PullReaderStream[+T] extends PullReaderStreamOps[T] with Stream[T]:
+trait PullReaderStream[+T] extends PullReaderStreamOps[T] with StreamFamily.PullStreamOps[T]:
   override type ThisStream[+V] = PullReaderStream[V]
 
   /** Create a resource of readers that can be used to retrieve the stream data. The stream can use this function to set
@@ -100,10 +100,6 @@ trait PullReaderStream[+T] extends PullReaderStreamOps[T] with Stream[T]:
 
   override def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T] = this
 
-  extension [V](ts: Stream[V])
-    override def adapt()(using BufferedStreamChannel.Size): PullReaderStream[V] = ts.toPullStream()
-    override def adapt(parallelism: Int)(using BufferedStreamChannel.Size): PullReaderStream[V] = ts.toPullStream()
-
   override def pushedBy[V](parallelism: Int)(
       task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit
   ): PushSenderStream[V] =
@@ -141,8 +137,8 @@ trait PullReaderStream[+T] extends PullReaderStreamOps[T] with Stream[T]:
 end PullReaderStream
 
 trait PullReaderStreamOps[+T] extends StreamOps[T]:
-  self: Family[T] =>
-  override type ThisStream[+V] <: PullReaderStreamOps[V] { type Family[T] = self.Family[T] }
+  self =>
+  override type ThisStream[+V] <: PullReaderStreamOps[V] { type Result[T] = self.Result[T] }
   override type PullType[+V] = ThisStream[V]
 
   /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the

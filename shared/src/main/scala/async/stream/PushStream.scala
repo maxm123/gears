@@ -25,7 +25,7 @@ import scala.util.Try
   */
 type PushDestination[+S[-_], -T] = S[T] | Iterator[S[T]]
 
-trait PushSenderStream[+T] extends PushChannelStream[T] with PushSenderStreamOps[T] with Stream[T]:
+trait PushSenderStream[+T] extends PushChannelStream[T] with PushSenderStreamOps[T] with StreamFamily.PushStreamOps[T]:
   override type ThisStream[+V] = PushSenderStream[V]
 
   def runToSender(sender: PushDestination[StreamSender, T])(using Async): Unit
@@ -57,16 +57,11 @@ trait PushSenderStream[+T] extends PushChannelStream[T] with PushSenderStreamOps
 
   override def toPushStream(): PushSenderStream[T] = this
   override def toPushStream(parallelism: Int): PushSenderStream[T] = this
-
-  extension [V](ts: Stream[V])
-    override def adapt()(using BufferedStreamChannel.Size): PushSenderStream[V] = ts.toPushStream()
-    override def adapt(parallelism: Int)(using BufferedStreamChannel.Size): PushSenderStream[V] =
-      ts.toPushStream(parallelism)
 end PushSenderStream
 
 trait PushSenderStreamOps[+T] extends StreamOps[T]:
-  self: Family[T] =>
-  override type ThisStream[+V] <: PushSenderStreamOps[V] { type Family[T] = self.Family[T] }
+  self =>
+  override type ThisStream[+V] <: PushSenderStreamOps[V] { type Result[T] = self.Result[T] }
   override type PushType[+V] = ThisStream[V]
 
   override def toPullStream()(using size: BufferedStreamChannel.Size) = pulledThrough(size.asInt)
