@@ -163,6 +163,7 @@ end StreamOps
 
 object StreamFamily extends Family: // PPFamily[[V] =>> Async ?=> V, PushSenderStream, PullReaderStream]
   type Result[+V] = gears.async.Async ?=> V
+  type FamilyOps[+T] = StreamOps[T]
   type PushStream[+T] = PushSenderStream[T]
   type PullStream[+T] = PullReaderStream[T]
 

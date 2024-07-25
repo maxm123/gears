@@ -3,6 +3,8 @@ package gears.async.stream
 import gears.async.Future
 import gears.async.Resource
 
+import scala.annotation.unchecked.uncheckedVariance
+
 sealed trait StreamType[-F <: Family]
 object SEmpty extends StreamType
 type SEmpty = SEmpty.type
@@ -13,39 +15,46 @@ type **:[+T <: StreamType.AnyStreamTpe[Family], +S <: StreamType[Family]] = SNex
 // TODO check family variance
 
 object StreamType:
-  type Applied[-F <: Family, +A[_ <: AnyStreamTpe[F]], T <: StreamType[F]] <: Tuple = T match
+  type Applied[+F <: Family, +A[_ <: AnyStreamTpe[F]], T <: StreamType[F]] <: Tuple = T match
     case SEmpty         => EmptyTuple
     case SNext[_, t, s] => A[t] *: Applied[F, A, s]
 
-  type AppliedOps[F <: Family, T <: StreamType[F], G <: F] =
-    Applied[F, [tpe <: AnyStreamTpe[F]] =>> OpsTypeFamily[F, tpe, G], T]
+  type AppliedOps[+F <: Family, +T <: StreamType[F], G <: F] <: Tuple = T @uncheckedVariance match
+    case SEmpty         => EmptyTuple
+    case SNext[_, t, s] => OpsType[F, t, G] *: AppliedOps[F, s, G]
+    // Applied[F, [tpe <: AnyStreamTpe[F]] =>> OpsType[F, tpe, G], T]
 
   sealed trait AnyStreamTpe[-F <: Family]
-  sealed abstract class StreamTpe[-F <: Family, -In, +Out, +Ops[G <: F] <: StreamOps[_]] extends AnyStreamTpe[F]
+  sealed abstract class StreamTpe[-F <: Family, +Ops[G <: F] <: FamilyOps[G, _]] extends AnyStreamTpe[F]
 
   // utility types to extract parts from a given stream type
-  type InType[X <: AnyStreamTpe[_]] = X match { case StreamTpe[_, in, _, _] => in }
-  type OutType[X <: AnyStreamTpe[_]] = X match { case StreamTpe[_, _, out, _] => out }
-  type OpsType[X <: AnyStreamTpe[_]] = X match { case StreamTpe[_, _, _, ops] => ops }
-  type OpsTypeFamily[F <: Family, X <: AnyStreamTpe[F], G <: F] = X match { case StreamTpe[_, _, _, ops] => ops[G] }
+  type OpsType[+F <: Family, +X <: AnyStreamTpe[F], G <: F] = X @uncheckedVariance match
+    case StreamTpe[_, ops] => ops[G]
+
+  type FamilyOpsAux[O[x] <: StreamOps[x]] = Family { type FamilyOps[T] = O[T] }
+  type FamilyOps[F <: Family, +A] = F match
+    case FamilyOpsAux[o] => o[A]
 
   // these (two times) two auxiliary types are necessary to extract the type member from a F <: Family type parameter
-  type PushAux[P[+A] <: PushSenderStreamOps[A]] = Family { type PushStream[T] = P[T] }
-  type PushStream[F <: Family, +A] <: PushSenderStreamOps[A] = F match
-    case PushAux[p] => p[A]
+  type PushAux =
+    [F <: Family] =>> [P[+A] <: PushSenderStreamOps[A] with FamilyOps[F, A]] =>> Family { type PushStream[T] = P[T] }
+  type PushStream[F <: Family, +A] <: PushSenderStreamOps[A] with FamilyOps[F, A] = F match
+    case PushAux[F][p] => p[A]
 
-  type PullAux[P[+A] <: PullReaderStreamOps[A]] = Family { type PullStream[T] = P[T] }
-  type PullStream[F <: Family, +A] <: PullReaderStreamOps[A] = F match
-    case PullAux[p] => p[A]
+  type PullAux =
+    [F <: Family] =>> [P[+A] <: PullReaderStreamOps[A] with FamilyOps[F, A]] =>> Family { type PullStream[T] = P[T] }
+  type PullStream[F <: Family, +A] <: PullReaderStreamOps[A] with FamilyOps[F, A] = F match
+    case PullAux[F][p] => p[A]
 
-  type Push[+A] = StreamTpe[Family, PushDestination[StreamSender, A], Future[Unit], [F <: Family] =>> PushStream[F, A]]
-  type Pull[+A] = StreamTpe[Family, Unit, PullSource[StreamReader, A], [F <: Family] =>> PullStream[F, A]]
+  type Push[+A] = StreamTpe[Family, [F <: Family] =>> PushStream[F, A]]
+  type Pull[+A] = StreamTpe[Family, [F <: Family] =>> PullStream[F, A]]
 
 trait Family:
   fam =>
   type Result[+V]
-  type PushStream[+T] <: PushStreamOps[T]
-  type PullStream[+T] <: PullStreamOps[T]
+  type FamilyOps[+T] <: StreamOps[T]
+  type PushStream[+T] <: PushStreamOps[T] with FamilyOps[T]
+  type PullStream[+T] <: PullStreamOps[T] with FamilyOps[T]
 
   trait PushStreamOps[+T] extends PushSenderStreamOps[T]:
     override type ThisStream[+V] = PushStream[V]
