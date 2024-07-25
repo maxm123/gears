@@ -67,26 +67,18 @@ object MixedFamily extends InOutFamily:
     type Out <: PullSource[StreamReader, T]
   }
 
-trait MixedStream[-F <: InOutFamily, +T <: StreamType[F]]:
+type BoundedTransformer[F <: Family] = [T <: StreamType[_ >: G], G <: F,
+O <: StreamType[G]] =>> (fam: G) => AppliedOps[T, fam.type] => AppliedOps[O, fam.type]
+
+trait MixedStream[-F <: InOutFamily, +T <: StreamType[F], -FF[
+    -T2 <: StreamType[_ >: G],
+    G <: F,
+    +O <: StreamType[G]
+] >: BoundedTransformer[F][T2, G, O]]:
   def run(using fam: F)(in: OpsInputs[AppliedOps[T, fam.type]]): Resource[OpsOutputs[AppliedOps[T, fam.type]]]
 
-  def transform[G <: F, O <: StreamType[G]](
-      f: (fam: G) => AppliedOps[T, fam.type] => AppliedOps[O, fam.type]
-  ): MixedStream[G, O]
+  def transform[G <: F, O <: StreamType[G]](f: FF[T, G, O]): MixedStream[G, O, FF]
 end MixedStream
-
-class MixedStreamHelper[-F <: InOutFamily, +T <: StreamType[F], -TF[
-    G <: F,
-    O <: StreamType[G],
-    -T2 >: T <: StreamType[F]
-] >: (fam: G) => AppliedOps[T2, fam.type] => AppliedOps[O, fam.type]]
-    extends MixedStream[F, T]:
-  override def run(using fam: F)(
-      in: OpsInputs[AppliedOps[T, fam.type]]
-  ): Resource[OpsOutputs[AppliedOps[T, fam.type]]] = ???
-  override def transform[G <: F, O <: StreamType[G]](
-      f: TF[G, O, T]
-  ): MixedStream[G, O] = ???
 
 /*
 trait MixedStreamTransform[-F <: Family, +T <: StreamType[F]] extends MixedStream[F, T]:
@@ -172,16 +164,13 @@ object MixedStream:
   type **:[+T <: AnyStreamTpe[InOutFamily], +S <: StreamType[InOutFamily]] = SNext[InOutFamily, T, S]
 
   class PullMixedStream[+T](stream: PullReaderStream[T])
-      extends MixedStreamHelper[
-        InOutFamily,
-        Pull[T] **: SEmpty,
-        [G <: InOutFamily, O <: StreamType[G],
-        T2 <: StreamType[InOutFamily]] =>> (fam: G) => AppliedOps[T2, fam.type] => AppliedOps[O, fam.type]
-      ]:
+      extends MixedStream[InOutFamily, Pull[T] **: SEmpty, BoundedTransformer[InOutFamily]]:
 
+    // (fam: G) => AppliedOps[Pull[T] **: SEmpty, fam.type] => AppliedOps[O, fam.type]
+    // override def transform[G <: InOutFamily, O <: StreamType[G], FF <: Any](f: FF): MixedStream[G, O] = ???
     override def transform[G <: InOutFamily, O <: StreamType[G]](
-        f: (fam: G) => AppliedOps[Pull[T] **: SEmpty, fam.type] => AppliedOps[O, fam.type]
-    ): MixedStream[G, O] = ???
+        f: BoundedTransformer[InOutFamily][Pull[T] **: SEmpty, G, O]
+    ): MixedStream[G, O, BoundedTransformer[G]] = ???
 
     override def run(using fam: InOutFamily)(
         in: OpsInputs[AppliedOps[Pull[T] **: SEmpty, fam.type]]
