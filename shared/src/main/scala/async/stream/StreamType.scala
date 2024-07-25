@@ -21,11 +21,11 @@ object StreamType:
   sealed abstract class StreamTpe[-F <: Family, +Ops[G <: F] <: FamilyOps[G, _]] extends AnyStreamTpe[F]
 
   // utility types to extract parts from a given stream type
-  type OpsType[+X <: AnyStreamTpe[_ >: G], G <: Family] = X @uncheckedVariance match
+  type OpsType[G <: Family, +X <: AnyStreamTpe[_ >: G]] = X @uncheckedVariance match
     case StreamTpe[_, ops] => ops[G]
 
-  type FamilyOpsAux[O[x] <: StreamOps[x]] = Family { type FamilyOps[T] = O[T] }
-  type FamilyOps[F <: Family, +A] = F match
+  type FamilyOpsAux[O[+A] <: StreamOps[A]] = Family { type FamilyOps[T] = O[T] }
+  type FamilyOps[F <: Family, +A] <: StreamOps[A] = F match
     case FamilyOpsAux[o] => o[A]
 
   // these (two times) two auxiliary types are necessary to extract the type member from a F <: Family type parameter

@@ -23,9 +23,9 @@ trait BottomEnd[-In, +Out]:
 // the tuple type of TopEnds (BottomEnds) given a stream type chain
 //type TransformTop[T <: StreamType[_]] = Applied[_, TopEndd, T]
 //type TransformBot[T <: StreamType] = Applied[BottomEndd, T]
-type AppliedOps[+T <: StreamType[_ >: G], G <: Family] <: Tuple = T @uncheckedVariance match
+type AppliedOps[G <: Family, +T <: StreamType[_ >: G]] <: Tuple = T @uncheckedVariance match
   case SEmpty         => EmptyTuple
-  case SNext[_, t, s] => OpsType[t, G] *: AppliedOps[s, G]
+  case SNext[_, t, s] => OpsType[G, t] *: AppliedOps[G, s]
 
 trait InOutFamily extends Family:
   type FamilyOps[+T] <: InOutOps[T]
@@ -55,20 +55,24 @@ type OpsOutputs[+T <: Tuple] <: Tuple = T @uncheckedVariance match
   case EmptyTuple            => EmptyTuple
   case OpsOutAux[in] *: rest => in *: OpsOutputs[rest]
 
+// == implementation specific. public for extensibility.
 object MixedFamily extends InOutFamily:
   type Result[+T] = Nothing
   type FamilyOps[+T] = InOutOps[T]
-  type PushStream[+T] = PushStreamOps[T] with InOutOps[T] { // TODO
-    type In >: PushDestination[StreamSender, T]
-    type Out = Future[Unit]
-  }
-  type PullStream[+T] = PullStreamOps[T] with FamilyOps[T] { // TODO
-    type In = Unit
-    type Out <: PullSource[StreamReader, T]
-  }
+  type PushStream[+T] = MixedPushStream[T]
+  type PullStream[+T] = MixedPullStream[T]
+
+trait MixedPushStream[+T] extends MixedFamily.PushStreamOps[T] with MixedFamily.InOutOps[T]:
+  type In >: PushDestination[StreamSender, T]
+  type Out = Future[Unit]
+
+trait MixedPullStream[+T] extends MixedFamily.PullStreamOps[T] with MixedFamily.InOutOps[T]:
+  type In = Unit
+  type Out <: PullSource[StreamReader, T]
+// == end of implementation specific
 
 trait MixedStream[F <: InOutFamily, +T <: StreamType[F]]:
-  def run(using fam: F)(in: OpsInputs[AppliedOps[T, fam.type]]): Resource[OpsOutputs[AppliedOps[T, fam.type]]]
+  def run(using fam: F)(in: OpsInputs[AppliedOps[fam.type, T]]): Resource[OpsOutputs[AppliedOps[fam.type, T]]]
 
   def transform[O <: StreamType[F]](f: MixedStream.Transformer[F, T, O]): MixedStream[F, O]
 end MixedStream
@@ -155,7 +159,7 @@ end MixedStreamTransform
  */
 object MixedStream:
   type Transformer = [F <: Family, T <: StreamType[F],
-  O <: StreamType[F]] =>> (fam: F) => AppliedOps[T, fam.type] => AppliedOps[O, fam.type]
+  O <: StreamType[F]] =>> (fam: F) => AppliedOps[fam.type, T] => AppliedOps[fam.type, O]
 
   type **:[+T <: AnyStreamTpe[InOutFamily], +S <: StreamType[InOutFamily]] = SNext[InOutFamily, T, S]
 
@@ -163,18 +167,20 @@ object MixedStream:
     override def transform[O <: StreamType[InOutFamily]](
         f: Transformer[InOutFamily, Pull[T] **: SEmpty, O]
     ): MixedStream[InOutFamily, O] =
-      val x: StreamType.PullStream[MixedFamily.type, T] *: EmptyTuple.type => AppliedOps[O, MixedFamily.type] =
+      val x: StreamType.PullStream[MixedFamily.type, T] *: EmptyTuple.type => AppliedOps[MixedFamily.type, O] =
         f(MixedFamily)
       val s: MixedFamily.PullStream[T] = ???
       // summon[StreamType.OpsType[Push[T], MixedFamily.type] =:= MixedFamily.PushStream[T]]
       // the 14k output is produced by this line:
-      // val y = x(Tuple1(s))
+      val y = x(Tuple1(s))
       ???
 
     override def run(using fam: InOutFamily)(
-        in: OpsInputs[AppliedOps[Pull[T] **: SEmpty, fam.type]]
-    ): Resource[OpsOutputs[AppliedOps[Pull[T] **: SEmpty, fam.type]]] =
+        in: OpsInputs[AppliedOps[fam.type, Pull[T] **: SEmpty]]
+    ): Resource[OpsOutputs[AppliedOps[fam.type, Pull[T] **: SEmpty]]] =
       stream.toReader(stream.parallelismHint).map(Tuple1(_))
+
+  // TODO fix AppliedOps order
 /*
   extension [T](stream: PullReaderStream[T])
     def toMixed(parallelism: Int): MixedStream[InOutFamily, Pull[T] **: SEmpty] = new MixedStream:
