@@ -2,7 +2,7 @@ package gears.async.stream
 
 import gears.async.Future
 import gears.async.Resource
-import gears.async.stream.StreamType.{AnyStreamTpe, Applied, AppliedOps, OpsType, Pull, Push}
+import gears.async.stream.StreamType.{AnyStreamTpe, Applied, OpsType, Pull, Push}
 
 import scala.annotation.unchecked.uncheckedVariance
 
@@ -23,6 +23,9 @@ trait BottomEnd[-In, +Out]:
 // the tuple type of TopEnds (BottomEnds) given a stream type chain
 //type TransformTop[T <: StreamType[_]] = Applied[_, TopEndd, T]
 //type TransformBot[T <: StreamType] = Applied[BottomEndd, T]
+type AppliedOps[+T <: StreamType[_ >: G], G <: Family] <: Tuple = T @uncheckedVariance match
+  case SEmpty         => EmptyTuple
+  case SNext[_, t, s] => OpsType[t, G] *: AppliedOps[s, G]
 
 trait InOutFamily extends Family:
   type FamilyOps[+T] <: InOutOps[T]
@@ -39,8 +42,11 @@ trait InOutFamily extends Family:
     type In
     type Out
 
-type OpsInAux[A] = { type In = A }
-type OpsOutAux[A] = { type Out = A } // TODO check how this works with type bounds
+object InOutFamily:
+  given InOutFamily = null
+
+type OpsInAux[A] = { type In >: A }
+type OpsOutAux[A] = { type Out <: A }
 
 type OpsInputs[-T <: Tuple] <: Tuple = T @uncheckedVariance match
   case EmptyTuple           => EmptyTuple
@@ -61,14 +67,27 @@ object MixedFamily extends InOutFamily:
     type Out <: PullSource[StreamReader, T]
   }
 
-trait MixedStream[+F <: InOutFamily, +T <: StreamType[F]]:
-  def a[G >: F](): AppliedOps[F, SNext[F, Push[String], SEmpty], G]
-  def run[G >: F](in: OpsInputs[AppliedOps[F, T, G]]): Unit // Resource[OpsOutputs[AppliedOps[F, T, _]]]
+trait MixedStream[-F <: InOutFamily, +T <: StreamType[F]]:
+  def run(using fam: F)(in: OpsInputs[AppliedOps[T, fam.type]]): Resource[OpsOutputs[AppliedOps[T, fam.type]]]
 
-  // def transform[O <: StreamType[F]](
-  //     f: (fam: F) => AppliedOps[F, T, fam.type] => AppliedOps[F, O, fam.type]
-  // ): MixedStream[F, O]
+  def transform[G <: F, O <: StreamType[G]](
+      f: (fam: G) => AppliedOps[T, fam.type] => AppliedOps[O, fam.type]
+  ): MixedStream[G, O]
 end MixedStream
+
+class MixedStreamHelper[-F <: InOutFamily, +T <: StreamType[F], -TF[
+    G <: F,
+    O <: StreamType[G],
+    -T2 >: T <: StreamType[F]
+] >: (fam: G) => AppliedOps[T2, fam.type] => AppliedOps[O, fam.type]]
+    extends MixedStream[F, T]:
+  override def run(using fam: F)(
+      in: OpsInputs[AppliedOps[T, fam.type]]
+  ): Resource[OpsOutputs[AppliedOps[T, fam.type]]] = ???
+  override def transform[G <: F, O <: StreamType[G]](
+      f: TF[G, O, T]
+  ): MixedStream[G, O] = ???
+
 /*
 trait MixedStreamTransform[-F <: Family, +T <: StreamType[F]] extends MixedStream[F, T]:
   self =>
@@ -149,29 +168,59 @@ trait MixedStreamTransform[-F <: Family, +T <: StreamType[F]] extends MixedStrea
   end transform
 end MixedStreamTransform
  */
-/* object MixedStream:
+object MixedStream:
+  type **:[+T <: AnyStreamTpe[InOutFamily], +S <: StreamType[InOutFamily]] = SNext[InOutFamily, T, S]
+
+  class PullMixedStream[+T](stream: PullReaderStream[T])
+      extends MixedStreamHelper[
+        InOutFamily,
+        Pull[T] **: SEmpty,
+        [G <: InOutFamily, O <: StreamType[G],
+        T2 <: StreamType[InOutFamily]] =>> (fam: G) => AppliedOps[T2, fam.type] => AppliedOps[O, fam.type]
+      ]:
+
+    override def transform[G <: InOutFamily, O <: StreamType[G]](
+        f: (fam: G) => AppliedOps[Pull[T] **: SEmpty, fam.type] => AppliedOps[O, fam.type]
+    ): MixedStream[G, O] = ???
+
+    override def run(using fam: InOutFamily)(
+        in: OpsInputs[AppliedOps[Pull[T] **: SEmpty, fam.type]]
+    ): Resource[OpsOutputs[AppliedOps[Pull[T] **: SEmpty, fam.type]]] =
+      stream.toReader(stream.parallelismHint).map(Tuple1(_))
+/*
   extension [T](stream: PullReaderStream[T])
-    def toMixed(parallelism: Int): MixedStream[Family, Pull[T] **: SEmpty] = new MixedStream:
-      def run(in: Applied[_, InType, Pull[T] **: SEmpty]): Resource[Applied[_, OutType, Pull[T] **: SEmpty]] =
+    def toMixed(parallelism: Int): MixedStream[InOutFamily, Pull[T] **: SEmpty] = new MixedStream:
+      def run(using fam: InOutFamily)(
+          in: OpsInputs[AppliedOps[Pull[T] **: SEmpty, fam.type]]
+      ): Resource[OpsOutputs[AppliedOps[Pull[T] **: SEmpty, fam.type]]] =
         stream.toReader(stream.parallelismHint).map(Tuple1(_))
-      def transform[O <: StreamType[Family]](
-          f: (fam: Family) => AppliedOps[Family, T, fam.type] => AppliedOps[Family, O, fam.type]
-      ): MixedStream[Family, O] = ???
+      def transform[G <: InOutFamily, O <: StreamType[G]](
+          f: (fam: G) => AppliedOps[Pull[T] **: SEmpty, fam.type] => AppliedOps[O, fam.type]
+      ): MixedStream[G, O] = ???
+      // type F = InOutFamily
+      // type T2 = Push[T] **: SEmpty
+      // def transform[G <: F, O <: StreamType[G]](
+      //     f: (fam: G) => AppliedOps[T2, fam.type] => AppliedOps[O, fam.type]
+      // ): MixedStream[G, O] = ???
 
-  given fromPushSender[T]: Conversion[PushSenderStream[T], MixedStream[Family, Push[T] **: SEmpty]] = (stream) =>
+  given fromPushSender[T]: Conversion[PushSenderStream[T], MixedStream[InOutFamily, Push[T] **: SEmpty]] = (stream) =>
     new MixedStream:
-      def run(in: Applied[_, InType, Push[T] **: SEmpty]): Resource[Applied[_, OutType, Push[T] **: SEmpty]] =
+      def run(using fam: InOutFamily)(
+          in: OpsInputs[AppliedOps[Push[T] **: SEmpty, fam.type]]
+      ): Resource[OpsOutputs[AppliedOps[Push[T] **: SEmpty, fam.type]]] =
+        // def run[G <: InOutFamily](
+        //     in: OpsInputs[AppliedOps[Push[T] **: SEmpty, G]]
+        // ): Resource[OpsOutputs[AppliedOps[Push[T] **: SEmpty, G]]] = ???
         Resource(Tuple1(Future.resolved(stream.runToSender(in._1))), _ => ())
-      def transform[O <: StreamType[Family]](
-          f: (fam: Family) => AppliedOps[Family, T, fam.type] => AppliedOps[Family, O, fam.type]
-      ): MixedStream[Family, O] = ???
+      def transform[G <: InOutFamily, O <: StreamType[G]](
+          f: (fam: G) => AppliedOps[Push[T] **: SEmpty, fam.type] => AppliedOps[O, fam.type]
+      ): MixedStream[G, O] = ???
 
-  given fromPullReader[T]: Conversion[PullReaderStream[T], MixedStream[Family, Pull[T] **: SEmpty]] = (stream) =>
+  given fromPullReader[T]: Conversion[PullReaderStream[T], MixedStream[InOutFamily, Pull[T] **: SEmpty]] = (stream) =>
     stream.toMixed(stream.parallelismHint)
-
-extension [F <: Family, T <: StreamType[F]](mixed: MixedStream[F, T])
-  def prependPush[V](stream: PushSenderStream[V]): MixedStream[F, Push[V] **: T] = ???
  */
+// extension [F <: Family, T <: StreamType[F]](mixed: MixedStream[F, T])
+//   def prependPush[V](stream: PushSenderStream[V]): MixedStream[F, Push[V] **: T] = ???
 
 // TODO problem: push stream runs synchronously in alloc, pull stream does not
 /*

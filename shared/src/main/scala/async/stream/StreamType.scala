@@ -6,29 +6,22 @@ import gears.async.Resource
 import scala.annotation.unchecked.uncheckedVariance
 
 sealed trait StreamType[-F <: Family]
-object SEmpty extends StreamType
+object SEmpty extends StreamType[Family]
 type SEmpty = SEmpty.type
 sealed abstract class SNext[-F <: Family, +T <: StreamType.AnyStreamTpe[F], +S <: StreamType[F]] extends StreamType[F]
 
-type **:[+T <: StreamType.AnyStreamTpe[Family], +S <: StreamType[Family]] = SNext[Family, T, S]
-
-// TODO check family variance
-
 object StreamType:
+  type **:[+T <: AnyStreamTpe[Family], +S <: StreamType[Family]] = SNext[Family, T, S]
+
   type Applied[+F <: Family, +A[_ <: AnyStreamTpe[F]], T <: StreamType[F]] <: Tuple = T match
     case SEmpty         => EmptyTuple
     case SNext[_, t, s] => A[t] *: Applied[F, A, s]
-
-  type AppliedOps[+F <: Family, +T <: StreamType[F], G <: F] <: Tuple = T @uncheckedVariance match
-    case SEmpty         => EmptyTuple
-    case SNext[_, t, s] => OpsType[F, t, G] *: AppliedOps[F, s, G]
-    // Applied[F, [tpe <: AnyStreamTpe[F]] =>> OpsType[F, tpe, G], T]
 
   sealed trait AnyStreamTpe[-F <: Family]
   sealed abstract class StreamTpe[-F <: Family, +Ops[G <: F] <: FamilyOps[G, _]] extends AnyStreamTpe[F]
 
   // utility types to extract parts from a given stream type
-  type OpsType[+F <: Family, +X <: AnyStreamTpe[F], G <: F] = X @uncheckedVariance match
+  type OpsType[+X <: AnyStreamTpe[_ >: G], G <: Family] = X @uncheckedVariance match
     case StreamTpe[_, ops] => ops[G]
 
   type FamilyOpsAux[O[x] <: StreamOps[x]] = Family { type FamilyOps[T] = O[T] }
