@@ -78,7 +78,7 @@ trait MixedPullStream[+T] extends MixedFamily.PullStreamOps[T] with MixedFamily.
 trait MixedStream[F <: InOutFamily, +T <: StreamType[F]]:
   def run(using fam: F)(in: OpsInputs[AppliedOps[fam.type, T]]): Resource[OpsOutputs[AppliedOps[fam.type, T]]]
 
-  def transform[O <: StreamType[F]](f: MixedStream.Transformer[F, T, O]): MixedStream[F, O]
+  def transform[O <: StreamType[F]](f: (fam: F) => MixedStream.Tfr[fam.type, T, O]): MixedStream[F, O]
 end MixedStream
 
 /*
@@ -162,20 +162,31 @@ trait MixedStreamTransform[-F <: Family, +T <: StreamType[F]] extends MixedStrea
 end MixedStreamTransform
  */
 object MixedStream:
-  type Transformer = [F <: Family, T <: StreamType[F],
-  O <: StreamType[F]] =>> (fam: F) => AppliedOps[fam.type, T] => AppliedOps[fam.type, O]
-
   type **:[+T <: AnyStreamTpe[InOutFamily], +S <: StreamType[InOutFamily]] = SNext[InOutFamily, T, S]
 
   class PullMixedStream[+T](stream: PullReaderStream[T]) extends MixedStream[InOutFamily, Pull[T] **: SEmpty]:
     override def transform[O <: StreamType[InOutFamily]](
-        f: Transformer[InOutFamily, Pull[T] **: SEmpty, O]
+        f: (f: InOutFamily) => Tfr[f.type, Pull[T] **: SEmpty, O]
     ): MixedStream[InOutFamily, O] = ???
 
     override def run(using fam: InOutFamily)(
         in: OpsInputs[AppliedOps[fam.type, Pull[T] **: SEmpty]]
     ): Resource[OpsOutputs[AppliedOps[fam.type, Pull[T] **: SEmpty]]] =
       stream.toReader(stream.parallelismHint).map(Tuple1(_))
+
+  def test(
+      a: MixedStream[InOutFamily, Push[String] **: Pull[Option[String]] **: SEmpty]
+  )(using gears.async.Async): MixedStream[InOutFamily, Push[Array[Byte]] **: Pull[String] **: SEmpty] =
+    a.transform(_ =>
+      (s1, s2) =>
+        val s1p = s1.pulledThrough(100)
+        val s2p = s2.map(_.map(_.getBytes()).getOrElse(Array[Byte]())).toPushStream(1)
+        (s2p, s1p)
+    )
+
+  @FunctionalInterface
+  trait Tfr[F <: Family, -T <: StreamType[_ >: F], +O <: StreamType[_ >: F]]
+      extends Function1[AppliedOps[F, T], AppliedOps[F, O]]
 
 /*
   extension [T](stream: PullReaderStream[T])
