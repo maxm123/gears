@@ -24,7 +24,7 @@ object StreamType:
   type OpsType[G <: Family, +X <: AnyStreamTpe[_ >: G]] = X @uncheckedVariance match
     case StreamTpe[_, ops] => ops[G]
 
-  type FamilyOpsAux[O[+A] <: StreamOps[A]] = Family { type FamilyOps[T] = O[T] }
+  type FamilyOpsAux[O[+A] <: Any with StreamOps[A]] = Family { type FamilyOps[T] = O[T] }
   type FamilyOps[F <: Family, +A] <: StreamOps[A] = F match
     case FamilyOpsAux[o] => o[A]
 
