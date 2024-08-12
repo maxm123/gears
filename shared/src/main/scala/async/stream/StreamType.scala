@@ -55,8 +55,14 @@ trait Family:
     override type PullType[+V] = PullStream[V]
     override type Result[+V] = fam.Result[V]
 
+    override def parallel(bufferSize: Int, parallelism: Int): PushStream[T] =
+      pulledThrough(bufferSize /* parHint ignored*/ ).toPushStream(parallelism)
+
   trait PullStreamOps[+T] extends PullReaderStreamOps[T]:
     override type ThisStream[+V] = PullStream[V]
     override type PushType[+V] = PushStream[V]
     override type PullType[+V] = PullStream[V]
     override type Result[+V] = fam.Result[V]
+
+    override def parallel(bufferSize: Int, parallelism: Int): PullStream[T] =
+      toPushStream().pulledThrough(bufferSize, parallelism)

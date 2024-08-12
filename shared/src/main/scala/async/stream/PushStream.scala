@@ -51,10 +51,6 @@ trait PushSenderStream[+T] extends PushChannelStream[T] with PushSenderStreamOps
   override def flatMap[V](outerParallelism: Int)(mapper: T => PushSenderStream[V]): PushSenderStream[V] =
     new PushLayers.FlatMapLayer.SenderMixer[T, V](mapper, outerParallelism, this)
 
-  override def parallel(bufferSize: Int, parallelism: Int): PushSenderStream[T] =
-    // the parallelization hint of the intermediate pull stream is ignored b/c an explicit parameter is passed to toPushStream
-    pulledThrough(bufferSize).toPushStream(parallelism)
-
   override def toPushStream(): PushSenderStream[T] = this
   override def toPushStream(parallelism: Int): PushSenderStream[T] = this
 end PushSenderStream
