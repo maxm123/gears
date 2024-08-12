@@ -181,4 +181,14 @@ object MixedStreamTransform:
     self: InOutFamily.InOutOps[T] =>
     def storeInput(in: In[T]): Unit
     def loadOutput(): Out[T]
+
+  trait TopOpsStore[T] extends TopOps[T] with BotOps[T]:
+    self: InOutFamily.InOutOps[T] =>
+    var input: In[T] = _
+    var output: Out[T] = _
+
+    override def storeInput(in: In[T]): Unit = input = in
+    override def getInput(): In[T] = input
+    override def setOutput(out: Out[T]): Unit = output = out
+    override def loadOutput(): Out[T] = output
 end MixedStreamTransform
