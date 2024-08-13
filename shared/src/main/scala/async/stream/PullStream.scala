@@ -506,7 +506,7 @@ private object PullLayers:
       end acquireFrom
 
       def acquireCell()(using Async): StreamCell[V] | StreamResult[V] =
-        outerPullGuard.acquire()
+        val guard = outerPullGuard.acquire()
         try
           while true do
             // first check innerCells again (synchronized with outer.readStream() case Right) for strict outerParallelism
@@ -520,7 +520,7 @@ private object PullLayers:
             val res = acquireFrom(outer)
             if res != null then return res // otherwise loop again
           null // unreachable
-        finally outerPullGuard.release()
+        finally guard.release()
       end acquireCell
 
       def linkReader(reader: ReaderLayer[T, V]) =

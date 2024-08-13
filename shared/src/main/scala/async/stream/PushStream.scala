@@ -321,12 +321,12 @@ private object PushLayers:
         if termination != null then throw ChannelClosedException()
 
         val stream = mapper(x)
-        sem.acquire()
+        val guard = sem.acquire()
         val dest = getInner()
         try stream.runToSender(dest)
         finally
           try yieldInner(dest)
-          finally sem.release()
+          finally guard.release()
 
       override def terminate(value: StreamResult.Done): Boolean =
         synchronized:
