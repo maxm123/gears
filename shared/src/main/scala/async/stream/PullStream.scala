@@ -29,7 +29,7 @@ import scala.util.Try
   */
 type PullSource[+S[+_], +T] = S[T] | Iterator[S[T]]
 
-trait PullReaderStream[+T] extends Stream[T]:
+trait PullReaderStream[+T] extends PullReaderStreamOps[T] with StreamFamily.PullStreamOps[T]:
   override type ThisStream[+V] = PullReaderStream[V]
 
   /** Create a resource of readers that can be used to retrieve the stream data. The stream can use this function to set
@@ -41,41 +41,21 @@ trait PullReaderStream[+T] extends Stream[T]:
     * @return
     *   the resource that wraps the stream readers
     */
-  def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, T]]
-
-  /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the
-    * user does not specify a pull parallelism level explicitly.
-    *
-    * @return
-    *   a hint on the number of threads that could/should be used to pull this stream
-    */
-  def parallelismHint: Int
+  def toReader(parallelism: Int): Resource[PullSource[StreamReader, T]]
 
   override def map[V](mapper: T => V): PullReaderStream[V] =
-    new PullLayers.MapLayer.ReaderMixer[T, V]
-      with PullLayers.MapLayer.MapLayer(mapper)
-      with PullLayers.FromReaderLayer(this)
+    new PullLayers.ReaderMixer[T, V](this) with PullLayers.MapLayer.ReaderTransformer[T, V](mapper)
 
   override def filter(test: T => Boolean): PullReaderStream[T] =
-    new PullLayers.FilterLayer.ReaderMixer[T]
-      with PullLayers.FilterLayer.FilterLayer(test)
-      with PullLayers.FromReaderLayer(this)
+    new PullLayers.ReaderMixer[T, T](this) with PullLayers.FilterLayer.ReaderTransformer[T](test)
 
   override def take(count: Int): PullReaderStream[T] =
-    new PullLayers.TakeLayer.ReaderMixer[T]
-      with PullLayers.TakeLayer.TakeLayer(count)
-      with PullLayers.FromReaderLayer(this)
+    new PullLayers.ReaderMixer[T, T](this) with PullLayers.TakeLayer.ReaderTransformer[T](count)
 
   override def flatMap[V](outerParallelism: Int)(mapper: T => PullReaderStream[V]): PullReaderStream[V] =
     new PullLayers.FlatMapLayer.ReaderMixer(this, outerParallelism, mapper)
 
-  /** @see
-    *   [[Stream.fold]]
-    *
-    * @param parallelism
-    *   the number of threads (futures) that are employed to concurrently pull this stream
-    */
-  def fold(parallelism: Int, folder: StreamFolder[T])(using Async): Try[folder.Container] =
+  override def fold(parallelism: Int, folder: StreamFolder[T]): Result[Try[folder.Container]] =
     require(parallelism > 0)
 
     def read(reader: StreamReader[T])(using Async): folder.Container =
@@ -107,33 +87,11 @@ trait PullReaderStream[+T] extends Stream[T]:
     catch case e: StreamResult.StreamTerminatedException => Failure(e.getCause())
   end fold
 
-  override def parallel(bufferSize: Int, parallelism: Int): PullReaderStream[T] =
-    // note that the given parallelism should be applied to steps following hereafter
-    //  -> set as parallelismHint for new stream and use this streams parallelismHint for pulling this stream
-    toPushStream(parallelismHint).pulledThrough(bufferSize, parallelism)
-
-  override def fold(folder: StreamFolder[T])(using Async): Try[folder.Container] = fold(parallelismHint, folder)
   override def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T] = this
-  override def toPushStream(): PushSenderStream[T] = toPushStream(parallelismHint)
 
-  extension [V](ts: Stream[V])
-    override def adapt()(using BufferedStreamChannel.Size): PullReaderStream[V] = ts.toPullStream()
-    override def adapt(parallelism: Int)(using BufferedStreamChannel.Size): PullReaderStream[V] = ts.toPullStream()
-
-  /** Transform this pull stream into a push stream by introducing an active component that pulls items, possibly
-    * transforms them, and pushes them downstream. On successful completion, the sender is closed automatically, unless
-    * the task throws (any exception), in which case it is itself responsible for closing the passed sender.
-    *
-    * @param parallelism
-    *   The number of task instances that are spawned. The actual number may be limited by sender/reader capabilities.
-    * @param task
-    *   The task to operate on the reader (to pull from this stream) and the sender which consumes the created stream's
-    *   output. It may throw a [[StreamResult.StreamTerminatedException]] to stop parallel executions of the same task
-    *   without further side effects. Any other exception will cancel (parallel) execution and bubble up.
-    * @return
-    *   a new push stream where elements emitted by the task will be sent to
-    */
-  def pushedBy[V](parallelism: Int)(task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit): PushSenderStream[V] =
+  override def pushedBy[V](parallelism: Int)(
+      task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit
+  ): PushSenderStream[V] =
     require(parallelism > 0)
     new PushSenderStream[V]:
       override def runToSender(senders: PushDestination[StreamSender, V])(using Async): Unit =
@@ -165,8 +123,48 @@ trait PullReaderStream[+T] extends Stream[T]:
                 futureIterator.foreach(_.await)
               if theSingle != null then theSingle.close()
           catch case _: StreamResult.StreamTerminatedException => {} // main goal: to cancel Async.group
+end PullReaderStream
 
-  override def toPushStream(parallelism: Int): PushSenderStream[T] = pushedBy(parallelism): (reader, sender) =>
+trait PullReaderStreamOps[+T] extends StreamOps[T]:
+  self =>
+  override type ThisStream[+V] <: PullReaderStreamOps[V] { type Result[T] = self.Result[T] }
+  override type PullType[+V] = ThisStream[V]
+
+  /** A hint used to pass down (from upstream to downstream) a possible degree of parallelism. This will be used if the
+    * user does not specify a pull parallelism level explicitly.
+    *
+    * @return
+    *   a hint on the number of threads that could/should be used to pull this stream
+    */
+  def parallelismHint: Int
+
+  /** @see
+    *   [[Stream.fold]]
+    *
+    * @param parallelism
+    *   the number of threads (futures) that are employed to concurrently pull this stream
+    */
+  def fold(parallelism: Int, folder: StreamFolder[T]): Result[Try[folder.Container]]
+
+  override def fold(folder: StreamFolder[T]): Result[Try[folder.Container]] = fold(parallelismHint, folder)
+
+  /** Transform this pull stream into a push stream by introducing an active component that pulls items, possibly
+    * transforms them, and pushes them downstream. On successful completion, the sender is closed automatically, unless
+    * the task throws (any exception), in which case it is itself responsible for closing the passed sender.
+    *
+    * @param parallelism
+    *   The number of task instances that are spawned. The actual number may be limited by sender/reader capabilities.
+    * @param task
+    *   The task to operate on the reader (to pull from this stream) and the sender which consumes the created stream's
+    *   output. It may throw a [[StreamResult.StreamTerminatedException]] to stop parallel executions of the same task
+    *   without further side effects. Any other exception will cancel (parallel) execution and bubble up.
+    * @return
+    *   a new push stream where elements emitted by the task will be sent to
+    */
+  def pushedBy[V](parallelism: Int)(task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit): PushType[V]
+
+  override def toPushStream(): PushType[T] = toPushStream(parallelismHint)
+  override def toPushStream(parallelism: Int): PushType[T] = pushedBy(parallelism): (reader, sender) =>
     val handle = reader.pull(it => { sender.send(it); true })
     var result: Option[StreamResult.Done] = None
 
@@ -184,56 +182,52 @@ trait PullReaderStream[+T] extends Stream[T]:
           if res.isInstanceOf[Throwable] then throw StreamResult.StreamTerminatedException(res.asInstanceOf[Throwable])
           else throw StreamResult.StreamTerminatedException() // terminated
     catch case _: ChannelClosedException => {} // case (2A) --> just stop silently, but case (2B) goes up to interrupt
+end PullReaderStreamOps
 
 trait PullChannelStream[+T] extends PullReaderStream[T]:
   /** @see
     *   PullReaderStream.toReader
     */
-  def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]]
-  override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, T]] = toChannel(parallelism)
+  def toChannel(parallelism: Int): Resource[PullSource[ReadableStreamChannel, T]]
+  override def toReader(parallelism: Int): Resource[PullSource[StreamReader, T]] = toChannel(parallelism)
 
   // These methods do not override their PullReaderStream correspondents because some implementations add an overhead
   // that should not implicitly be added unless the programmer requires the full channel access.
 
   def channelMap[V](mapper: T => V): PullChannelStream[V] =
-    new PullLayers.MapLayer.ChannelMixer[T, V]
-      with PullLayers.MapLayer.MapLayer(mapper)
-      with PullLayers.FromChannelLayer(this)
+    new PullLayers.ChannelMixer[T, V](this) with PullLayers.MapLayer.ChannelTransformer[T, V](mapper)
 
   def channelFilter(test: T => Boolean): PullChannelStream[T] =
-    new PullLayers.FilterLayer.ChannelMixer[T]
-      with PullLayers.FilterLayer.FilterLayer(test)
-      with PullLayers.FromChannelLayer(this)
+    new PullLayers.ChannelMixer[T, T](this) with PullLayers.FilterLayer.ChannelTransformer[T](test)
 
   def channelTake(count: Int): PullChannelStream[T] =
-    new PullLayers.TakeLayer.ChannelMixer[T]
-      with PullLayers.TakeLayer.TakeLayer(count)
-      with PullLayers.FromChannelLayer(this)
+    new PullLayers.ChannelMixer[T, T](this) with PullLayers.TakeLayer.ChannelTransformer[T](count)
 
-private object PullLayers:
-  // helpers for generating the layer ("mixer") traits (for derived streams)
-  trait FromAnyReaderLayer[+S[+_] <: PullReaderStream[_], +V](val upstream: S[V])
-  type FromChannelLayer[V] = FromAnyReaderLayer[PullChannelStream, V]
-  type FromReaderLayer[V] = FromAnyReaderLayer[PullReaderStream, V]
+private[stream] object PullLayers:
+  trait SourceTransformer[S[+_] <: StreamReader[_], -T, +V]:
+    def transform(reader: PullSource[S, T]): PullSource[S, V]
+
+  trait SingleSourceTransformer[S[+_] <: StreamReader[_], -T, +V] extends SourceTransformer[S, T, V]:
+    def transformSingle(reader: S[T]): S[V]
+    override def transform(reader: PullSource[S, T]): PullSource[S, V] =
+      mapMaybeIt(reader)(transformSingle)
+
+  trait ReaderMixer[-T, +V](upstream: PullReaderStream[T]) extends PullReaderStream[V]:
+    self: SourceTransformer[StreamReader, T, V] =>
+    override def parallelismHint: Int = upstream.parallelismHint
+    override def toReader(parallelism: Int): Resource[PullSource[StreamReader, V]] =
+      upstream.toReader(parallelism).map(transform)
+
+  trait ChannelMixer[-T, +V](upstream: PullChannelStream[T]) extends PullChannelStream[V]:
+    self: SourceTransformer[ReadableStreamChannel, T, V] =>
+    override def parallelismHint: Int = upstream.parallelismHint
+    override def toChannel(parallelism: Int): Resource[PullSource[ReadableStreamChannel, V]] =
+      upstream.toChannel(parallelism).map(transform)
 
   // helpers for the derived channels
   trait FromAnyReader[+S[+_] <: StreamReader[_], +V](val upstream: S[V])
   type FromReader[V] = FromAnyReader[StreamReader, V]
   type FromChannel[V] = FromAnyReader[ReadableStreamChannel, V]
-
-  trait ReaderMixer[T, V] extends PullReaderStream[V]:
-    self: FromReaderLayer[T] =>
-    def transform(reader: StreamReader[T]): StreamReader[V]
-    override def parallelismHint: Int = upstream.parallelismHint
-    override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, V]] =
-      upstream.toReader(parallelism).map(mapMaybeIt(_)(transform))
-
-  trait ChannelMixer[T, V] extends PullChannelStream[V]:
-    self: FromChannelLayer[T] =>
-    def transform(channel: ReadableStreamChannel[T]): ReadableStreamChannel[V]
-    override def parallelismHint: Int = upstream.parallelismHint
-    override def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, V]] =
-      upstream.toChannel(parallelism).map(mapMaybeIt(_)(transform))
 
   object MapLayer:
     trait MapLayer[T, V](val mapper: T => V)
@@ -248,14 +242,12 @@ private object PullLayers:
       override val readStreamSource: Async.Source[StreamResult[V]] =
         upstream.readStreamSource.transformValuesWith(_.map(mapper))
 
-    trait ReaderMixer[T, V] extends PullLayers.ReaderMixer[T, V]:
-      self: FromReaderLayer[T] with MapLayer[T, V] =>
-      override def transform(reader: StreamReader[T]): StreamReader[V] =
+    trait ReaderTransformer[T, V](mapper: T => V) extends SingleSourceTransformer[StreamReader, T, V]:
+      override def transformSingle(reader: StreamReader[T]): StreamReader[V] =
         new ReaderLayer[T, V] with FromReader(reader) with MapLayer(mapper)
 
-    trait ChannelMixer[T, V] extends PullLayers.ChannelMixer[T, V]:
-      self: FromChannelLayer[T] with MapLayer[T, V] =>
-      override def transform(channel: ReadableStreamChannel[T]): ReadableStreamChannel[V] =
+    trait ChannelTransformer[T, V](mapper: T => V) extends SingleSourceTransformer[ReadableStreamChannel, T, V]:
+      override def transformSingle(channel: ReadableStreamChannel[T]): ReadableStreamChannel[V] =
         new ChannelLayer[T, V] with ReaderLayer[T, V] with FromChannel[T](channel) with MapLayer[T, V](mapper)
   end MapLayer
 
@@ -307,20 +299,16 @@ private object PullLayers:
             res
     end ChannelLayer
 
-    trait ReaderMixer[T] extends PullLayers.ReaderMixer[T, T]:
-      self: FromReaderLayer[T] with FilterLayer[T] =>
-      override def transform(reader: StreamReader[T]): StreamReader[T] =
+    trait ReaderTransformer[T](filter: T => Boolean) extends SingleSourceTransformer[StreamReader, T, T]:
+      override def transformSingle(reader: StreamReader[T]): StreamReader[T] =
         new ReaderLayer[T] with FromReader(reader) with FilterLayer(filter)
 
-    trait ChannelMixer[T] extends PullLayers.ChannelMixer[T, T]:
-      self: FromChannelLayer[T] with FilterLayer[T] =>
-      override def transform(channel: ReadableStreamChannel[T]): ReadableStreamChannel[T] =
+    trait ChannelTransformer[T](filter: T => Boolean) extends SingleSourceTransformer[ReadableStreamChannel, T, T]:
+      override def transformSingle(channel: ReadableStreamChannel[T]): ReadableStreamChannel[T] =
         new ChannelLayer[T] with ReaderLayer[T] with PullLayers.FromChannel[T](channel) with FilterLayer[T](filter)
   end FilterLayer
 
   object TakeLayer:
-    trait TakeLayer(val count: Int)
-
     // can never know whether readStream() item result is already consumed (happens after return) -> do not terminate
     abstract class ReaderLayer[T](remaining: AtomicInteger) extends StreamReader[T]:
       self: FromReader[T] =>
@@ -395,24 +383,16 @@ private object PullLayers:
           else result
         else Left(StreamResult.Closed)
 
-    trait ReaderMixer[T] extends PullReaderStream[T]:
-      self: FromReaderLayer[T] with TakeLayer =>
-      override def parallelismHint: Int = upstream.parallelismHint
-      override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, T]] =
+    trait ReaderTransformer[T](count: Int) extends SourceTransformer[StreamReader, T, T]:
+      override def transform(reader: PullSource[StreamReader, T]): PullSource[StreamReader, T] =
         val remaining = AtomicInteger(count)
-        upstream
-          .toReader(parallelism)
-          .map(mapMaybeIt(_)(reader => new ReaderLayer[T](remaining) with FromReader(reader)))
+        mapMaybeIt(reader)(single => new ReaderLayer[T](remaining) with FromReader(single))
 
-    trait ChannelMixer[T] extends PullChannelStream[T]:
-      self: FromChannelLayer[T] with TakeLayer =>
-      override def parallelismHint: Int = upstream.parallelismHint
-      override def toChannel(parallelism: Int)(using Async): Resource[PullSource[ReadableStreamChannel, T]] =
+    trait ChannelTransformer[T](count: Int) extends SourceTransformer[ReadableStreamChannel, T, T]:
+      override def transform(channel: PullSource[ReadableStreamChannel, T]): PullSource[ReadableStreamChannel, T] =
         val counter = ChannelCounter(count)
         val lock = ReentrantLock()
-        upstream
-          .toChannel(parallelism)
-          .map(mapMaybeIt(_)(ch => new ChannelLayer[T](counter, lock) with FromChannel(ch)))
+        mapMaybeIt(channel)(ch => new ChannelLayer[T](counter, lock) with FromChannel(ch))
   end TakeLayer
 
   object FlatMapLayer:
@@ -631,7 +611,7 @@ private object PullLayers:
     class ReaderMixer[T, V](upstream: PullReaderStream[T], outerParallelism: Int, mapper: T => PullReaderStream[V])
         extends PullReaderStream[V]:
       override def parallelismHint: Int = upstream.parallelismHint.max(outerParallelism)
-      override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, V]] =
+      override def toReader(parallelism: Int): Resource[PullSource[StreamReader, V]] =
         val effectiveOuter = outerParallelism.min(parallelism)
         upstream
           .toReader(effectiveOuter)

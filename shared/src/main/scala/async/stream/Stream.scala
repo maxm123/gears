@@ -55,8 +55,19 @@ private[stream] inline def handleMaybeIt[S[_], T, V](
 private[stream] inline def mapMaybeIt[S[_], T, V](source: S[T] | Iterator[S[T]])(single: S[T] => S[V]) =
   handleMaybeIt(source)(single)(_.map(single))
 
-trait Stream[+T]:
-  type ThisStream[+V] <: Stream[V]
+trait StreamOps[+T]:
+  self =>
+
+  /** A container type that is returned by terminal operations such as [[fold]].
+    */
+  type Result[+W]
+
+  /** The more specific type of this stream that all streams of the same push/pull characteristic inhabit. Will usually
+    * be either [[PushType]] or [[PullType]] depending on this stream's type.
+    */
+  type ThisStream[+V] <: StreamOps[V] { type Result[T] = self.Result[T] }
+  type PushType[+V] <: PushSenderStreamOps[V] { type Result[T] = self.Result[T] }
+  type PullType[+V] <: PullReaderStreamOps[V] { type Result[T] = self.Result[T] }
 
   /** Transform elements of this stream one by one
     *
@@ -94,8 +105,6 @@ trait Stream[+T]:
     *   a function to create an inner stream for each element of this stream
     * @return
     *   a joined stream of the inner streams of each element
-    * @see
-    *   [[adapt]]
     */
   def flatMap[V](outerParallelism: Int = 1)(mapper: T => ThisStream[V]): ThisStream[V]
 
@@ -106,7 +115,7 @@ trait Stream[+T]:
     * @return
     *   the result as computed by the [[folder]]
     */
-  def fold(folder: StreamFolder[T])(using Async): Try[folder.Container]
+  def fold(folder: StreamFolder[T]): Result[Try[folder.Container]]
 
   /** Introduce an asynchronous boundary decoupling upstream computation steps from downstream. The resulting stream
     * will run the stream stages in parallel (using [[gears.async.Future]]s) and communicate the elements through a
@@ -121,33 +130,6 @@ trait Stream[+T]:
     */
   def parallel(bufferSize: Int, parallelism: Int): ThisStream[T]
 
-  // conversion methods
-
-  extension [V](ts: Stream[V])
-    /** Convert this stream to a stream matching the [[ThisStream]] type. The transformation depends on both stream
-      * types. It can be a no-op, introduce an active component (push) or a channel (pull).
-      *
-      * @see
-      *   [[toPushStream()]] if the required type is a push stream
-      * @see
-      *   [[toPullStream]] if the required type is a pull stream
-      * @return
-      *   a stream of correct type, possibly transformed, possibly itself
-      */
-    def adapt()(using BufferedStreamChannel.Size): ThisStream[V]
-
-    /** Convert this stream to a stream matching the [[ThisStream]] type. The transformation depends on both stream
-      * types. It can be a no-op, introduce an active component (push) or a channel (pull).
-      *
-      * @see
-      *   [[toPushStream(parallelism:Int)]] if the required type is a push stream
-      * @see
-      *   [[toPullStream]] if the required type is a pull stream
-      * @return
-      *   a stream of correct type, possibly transformed, possibly itself
-      */
-    def adapt(parallelism: Int)(using BufferedStreamChannel.Size): ThisStream[V]
-
   /** Convert this stream to a push stream, possibly requiring a new active (possibly thread-spawning) component. The
     * stream implementation may decide on a reasonable parallelism.
     *
@@ -156,7 +138,7 @@ trait Stream[+T]:
     * @see
     *   [[toPushStream(parallelism:Int)]]
     */
-  def toPushStream(): PushSenderStream[T]
+  def toPushStream(): PushType[T]
 
   /** Convert this stream to a push stream, possibly requiring a new active (possibly thread-spawning) component. The
     * parallelism of pulling and pushing is explicitly specified. Note that this will be ignored if this stream is
@@ -167,7 +149,7 @@ trait Stream[+T]:
     * @return
     *   a stream pushing the elements of this stream, or this if it already is a push stream
     */
-  def toPushStream(parallelism: Int): PushSenderStream[T]
+  def toPushStream(parallelism: Int): PushType[T]
 
   /** Convert this stream to a pull stream, possibly decoupling the stream consumer the from the sender through
     * concurrency and introduction of a channel. The size of that channel is taken from the context parameter. Note that
@@ -176,8 +158,16 @@ trait Stream[+T]:
     * @return
     *   a stream from which the elements of this stream can be pulled
     */
-  def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T]
-end Stream
+  def toPullStream()(using BufferedStreamChannel.Size): PullType[T]
+end StreamOps
+
+object StreamFamily extends Family:
+  type Result[+V] = gears.async.Async ?=> V
+  type FamilyOps[+T] = StreamOps[T]
+  type PushStream[+T] = PushSenderStream[T]
+  type PullStream[+T] = PullReaderStream[T]
+
+type Stream[+T] = StreamOps[T] { type Result[+V] = Async ?=> V }
 
 object Stream:
   extension [T](s: Stream[T])
@@ -203,7 +193,7 @@ object Stream:
 
   def fromArray[A](a: Array[A]): PullReaderStream[A] = new PullReaderStream[A]:
     override def parallelismHint: Int = 1
-    override def toReader(parallelism: Int)(using Async): Resource[PullSource[StreamReader, A]] = Resource(
+    override def toReader(parallelism: Int): Resource[PullSource[StreamReader, A]] = Resource(
       {
         val effectiveParallelism = parallelism.min(a.size) // TODO better limit
         val step = Math.ceilDiv(a.size, effectiveParallelism)
