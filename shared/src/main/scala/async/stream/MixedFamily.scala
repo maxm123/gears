@@ -4,8 +4,12 @@ import gears.async.Async
 import gears.async.Future
 import gears.async.Resource
 import gears.async.stream.BufferedStreamChannel.Size
+import gears.async.stream.InOutFamily.OpsInputs
+import gears.async.stream.InOutFamily.OpsOutputs
 import gears.async.stream.MixedFamily.PullStream
 import gears.async.stream.MixedFamily.PushStream
+import gears.async.stream.StreamType.Pull
+import gears.async.stream.StreamType.Push
 
 import scala.util.Try
 
@@ -89,10 +93,72 @@ trait MixedPullStream[+T] extends MixedFamily.PullStreamOps[T] with InOutFamily.
   override def toPullStream()(using Size): PullStream[T] = this
 end MixedPullStream
 
-val emptyMixedStream: MixedStream[InOutFamily, SEmpty] = new MixedStreamTransform:
+private type MFStream[T <: StreamType[InOutFamily]] = MixedStreamTransform[InOutFamily, T] { val fam: MixedFamily.type }
+
+private trait MixedStreamPrepend[T <: StreamType[InOutFamily]]:
+  self: MFStream[T] =>
   val fam = MixedFamily
+
+  // TODO remove
+  inline def cast[V](fam: Family)(
+      inline s: fam.PullStream[V] with TopOps[V]
+  ): StreamType.PullStream[fam.type, V] with TopOps[V] = s
+
+  inline def combine[V](f: InOutFamily)(
+      s: f.PullStream[V] & TopOps[V],
+      rest: AppliedOpsTop[f.type, T]
+  ): (StreamType.PullStream[f.type, V] & TopOps[V]) *:
+    AppliedOpsTop[f.type, T] = // AppliedOpsTop[f.type, SNext[InOutFamily, Pull[V], T]] =
+    s *: rest
+
+  def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[InOutFamily, Pull[V], T]] =
+    new MixedStreamTransform[InOutFamily, SNext[InOutFamily, Pull[V], T]]
+      with MixedStreamPrepend[SNext[InOutFamily, Pull[V], T]]:
+      protected def genOps: AppliedOpsTop[fam.type, SNext[InOutFamily, Pull[V], T]] =
+        val newOps: (fam.PullStream[V] with TopOps[V]) =
+          new MixedPullStream[V] with TopOpsStore[V]:
+            def parallelismHint: Int = ps.parallelismHint
+        // ??? *: self.genOps
+        // val newOps3 = (newOps: MixedFamily.PullStream[V] with TopOps[V])
+        // val newOps3: StreamType.PullStream[fam.type, V] with TopOps[V] = cast(fam)(newOps)
+        val newOps2 = newOps.asInstanceOf[StreamType.PullStream[fam.type, V] with TopOps[V]]
+        // summon[MixedFamily.PullStream[String] <:< BotOps[String]]
+        // summon[MixedStreamTransform.ItsTop[MixedFamily.PullStreamOps[String]] =:= TopOps[String]]
+        // summon[newOps.type <:< StreamType.PullStream[MixedFamily.type, V]]
+        // val f: Family = ???
+        // summon[StreamType.PullStream[f.type, V] =:= f.PullStream[V]]
+        // summon[StreamType.PullStream[MixedFamily.type, V] =:= MixedFamily.PullStream[V]]
+        // summon[StreamType.FamilyOps[MixedFamily.type, V] =:= MixedFamily.FamilyOps[V]]
+        // val x: AppliedOpsTop[fam.type, SNext[InOutFamily, Pull[V], T]] = self.combine[V](fam)(newOps, ???)
+        // (newOps2) *: self.genOps
+        null
+
+      def run(
+          in: OpsInputs[AppliedOps[MixedFamily.type, SNext[InOutFamily, Pull[V], T]]]
+      ): Resource[OpsOutputs[AppliedOps[MixedFamily.type, SNext[InOutFamily, Pull[V], T]]]] = ???
+
+  def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[InOutFamily, Push[V], T]] = ???
+
+private object IofOg extends SingleOpGen[InOutFamily]:
+  val fam: MixedFamily.type = MixedFamily
+  /*
+  def genPull[V]: fam.PullStream[V] &
+    ((gears.async.stream.IofOg#fam.PullStreamOps[V] & gears.async.stream.IofOg#fam.FamilyOps[V]){type In[V] = stream.InOutFamily.PullIn[V]; type Out[V] = stream.InOutFamily.PullOut[V]} match {
+      case stream.StreamOps[t] => gears.async.stream.MixedStreamTransform.TopOps[t]
+    }) = ??? */
+  def genPull[V]: fam.PullStream[V] & ItsTop[fam.PullStream[V]] =
+    new MixedPullStream[V] with TopOpsStore[V]:
+      def parallelismHint: Int = 1 // ps.parallelismHint
+    ???
+
+val emptyMixedStream: MixedStream[InOutFamily, SEmpty] = new PrependHelper:
+  val fam = MixedFamily
+  val og = ???
   protected def genOps: AppliedOpsTop[fam.type, SEmpty] = Tuple()
   def run(
       in: InOutFamily.OpsInputs[AppliedOps[fam.type, SEmpty]]
   ): Resource[InOutFamily.OpsOutputs[AppliedOps[fam.type, SEmpty]]] =
     Resource(Tuple(), _ => ())
+
+  // def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[InOutFamily, Pull[V], SEmpty.type]] = ???
+  // def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[InOutFamily, Push[V], SEmpty.type]] = ???

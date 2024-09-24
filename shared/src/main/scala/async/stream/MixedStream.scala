@@ -3,6 +3,8 @@ package gears.async.stream
 import gears.async.Async
 import gears.async.Future
 import gears.async.Resource
+import gears.async.stream.InOutFamily.OpsInputs
+import gears.async.stream.InOutFamily.OpsOutputs
 import gears.async.stream.MixedStream.Tfr
 import gears.async.stream.StreamType.{AnyStreamTpe, Applied, FamilyOps, OpsType, Pull, Push}
 
@@ -45,11 +47,18 @@ object InOutFamily:
 end InOutFamily
 
 trait MixedStream[F <: InOutFamily, +T <: StreamType[F]]:
+  self =>
+
+  type SameMixed[+T <: StreamType[F]] = MixedStream[F, T] { val fam: self.fam.type }
+
   val fam: F
 
   def run(in: InOutFamily.OpsInputs[AppliedOps[fam.type, T]]): Resource[InOutFamily.OpsOutputs[AppliedOps[fam.type, T]]]
 
-  def transform[O <: StreamType[F]](f: MixedStream.Tfr[fam.type, T, O]): MixedStream[F, O]
+  def transform[O <: StreamType[F]](f: MixedStream.Tfr[fam.type, T, O]): SameMixed[O]
+
+  def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[F, Pull[V], T]]
+  def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[F, Push[V], T]]
 end MixedStream
 
 object MixedStream:
@@ -68,7 +77,7 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
 
   protected def genOps: AppliedOpsTop[fam.type, T]
 
-  override def transform[O <: StreamType[F]](f: MixedStream.Tfr[fam.type, T, O]): MixedStream[F, O] =
+  override def transform[O <: StreamType[F]](f: MixedStream.Tfr[fam.type, T, O]): SameMixed[O] =
     type STypeCast[S <: StreamType[F]] = S
 
     type TopOpsInAux[T, A[-_]] = TopOps[T] { type In[-V] = A[V] }
@@ -128,6 +137,7 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
         val ops = genOps
 
         // drops upcasts (OpsType[G, t] & TopOps[t]) to OpsType[G, t] for every tuple member
+        // TODO recheck AOpsTop
         val topOps = (ops: AppliedOpsTop[fam.type, T]).asInstanceOf[AppliedOps[fam.type, T]]
 
         val botOps = f(topOps)
@@ -149,6 +159,7 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
 
           Therefore: TopOpsInputs[AppliedOpsTop[G, T]] =:= OpsInputs[AppliedOps[G, T]] for any family G, stream type T
          */
+        // TODO recheck AOpsTop
         val topInputs =
           (getInputs[AppliedOpsTop[fam.type, T]](ops): TopOpsInputs[AppliedOpsTop[fam.type, T]])
             .asInstanceOf[OpsInputs[AppliedOps[fam.type, T]]]
@@ -158,19 +169,28 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
         self
           .run(topInputs)
           .map: (topOutpts: OpsOutputs[AppliedOps[fam.type, T]]) =>
+            // TODO recheck AOpsTop
             val topOutputs = topOutpts.asInstanceOf[OpsOutputs[AppliedOpsTop[fam.type, T]]]
             setOutput(ops, topOutputs)
             (loadOutputs[AppliedOps[fam.type, O]](botOps): BotOpsOutputs[AppliedOps[fam.type, O]])
               .asInstanceOf[OpsOutputs[AppliedOps[fam.type, O]]]
 
-      override def transform[O2 <: StreamType[F]](f2: Tfr[fam.type, O, O2]): MixedStream[F, O2] =
+      override def transform[O2 <: StreamType[F]](f2: Tfr[fam.type, O, O2]): SameMixed[O2] =
         self.transform(in => f2(f(in)))
+
+      override def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[F, Push[V], O]] =
+        self.prependedPush(ps).transform { case p *: rest => p *: f(rest) }
+      override def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[F, Pull[V], O]] =
+        self.prependedPull(ps).transform { case p *: rest => p *: f(rest) }
 end MixedStreamTransform
 
 object MixedStreamTransform:
+  type ItsTop[T <: StreamOps[_]] = T match
+    case StreamOps[t] => TopOps[t]
+
   type AppliedOpsTop[G <: Family, +T <: StreamType[_ >: G]] <: Tuple = T @uncheckedVariance match
     case SEmpty         => EmptyTuple
-    case SNext[_, t, s] => (OpsType[G, t] & TopOps[t]) *: AppliedOpsTop[G, s]
+    case SNext[_, t, s] => (OpsType[G, t] & ItsTop[OpsType[G, t]]) *: AppliedOpsTop[G, s]
 
   trait TopOps[T] extends StreamOps[T]:
     self: InOutFamily.InOutOps[T] =>
@@ -191,4 +211,26 @@ object MixedStreamTransform:
     override def getInput(): In[T] = input
     override def setOutput(out: Out[T]): Unit = output = out
     override def loadOutput(): Out[T] = output
+
+  trait SingleOpGen[F <: InOutFamily]:
+    val fam: F
+    def genPull[V]: fam.PullStream[V] with MixedStreamTransform.ItsTop[fam.PullStream[V]]
+
+  trait PrependHelper[F <: InOutFamily, +T <: StreamType[F]] extends MixedStreamTransform[F, T]:
+    self =>
+    val og: SingleOpGen[F] { val fam: self.fam.type }
+
+    def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[F, Pull[V], T]] =
+      new PrependHelper[F, SNext[F, Pull[V], T]]:
+        val fam: self.fam.type = self.fam
+        val og = self.og
+        protected def genOps: AppliedOpsTop[fam.type, SNext[F, Pull[V], T]] = og.genPull[V] *: self.genOps
+        def run(
+            in: OpsInputs[AppliedOps[fam.type, SNext[F, Pull[V], T]]]
+        ): Resource[OpsOutputs[AppliedOps[fam.type, SNext[F, Pull[V], T]]]] =
+          val o1 = ps.toReader(ps.parallelismHint)
+          val o2 = self.run(in.tail)
+          Resource.both(o1, o2)(_ *: _)
+
+    def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[F, Push[V], T]] = ???
 end MixedStreamTransform
