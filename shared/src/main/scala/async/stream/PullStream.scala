@@ -29,7 +29,7 @@ import scala.util.Try
   */
 type PullSource[+S[+_], +T] = S[T] | Iterator[S[T]]
 
-trait PullReaderStream[+T] extends PullReaderStreamOps[T] with StreamFamily.PullStreamOps[T]:
+trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
   override type ThisStream[+V] = PullReaderStream[V]
 
   /** Create a resource of readers that can be used to retrieve the stream data. The stream can use this function to set
@@ -230,42 +230,43 @@ private[stream] object PullLayers:
   type FromChannel[V] = FromAnyReader[ReadableStreamChannel, V]
 
   object MapLayer:
-    trait MapLayer[T, V](val mapper: T => V)
+    trait MapContainer[T, V](val mapper: T => V)
 
     trait ReaderLayer[T, V] extends StreamReader[V]:
-      self: FromReader[T] with MapLayer[T, V] =>
+      self: FromReader[T] with MapContainer[T, V] =>
       override def readStream()(using Async): StreamResult[V] = upstream.readStream().map(mapper)
       override def pull(onItem: V => (Async) ?=> Boolean): StreamPull = upstream.pull(onItem.compose(mapper))
 
-    trait ChannelLayer[T, V] extends ReadableStreamChannel[V]:
-      self: FromChannel[T] with MapLayer[T, V] =>
+    trait ChannelLayer[T, V] extends ReadableStreamChannel[V] with ReaderLayer[T, V]:
+      self: FromChannel[T] with MapContainer[T, V] =>
       override val readStreamSource: Async.Source[StreamResult[V]] =
         upstream.readStreamSource.transformValuesWith(_.map(mapper))
 
     trait ReaderTransformer[T, V](mapper: T => V) extends SingleSourceTransformer[StreamReader, T, V]:
       override def transformSingle(reader: StreamReader[T]): StreamReader[V] =
-        new ReaderLayer[T, V] with FromReader(reader) with MapLayer(mapper)
+        new ReaderLayer[T, V] with FromReader(reader) with MapContainer(mapper)
 
     trait ChannelTransformer[T, V](mapper: T => V) extends SingleSourceTransformer[ReadableStreamChannel, T, V]:
       override def transformSingle(channel: ReadableStreamChannel[T]): ReadableStreamChannel[V] =
-        new ChannelLayer[T, V] with ReaderLayer[T, V] with FromChannel[T](channel) with MapLayer[T, V](mapper)
+        new ChannelLayer[T, V] with FromChannel(channel) with MapContainer(mapper)
   end MapLayer
 
   object FilterLayer:
-    trait FilterLayer[T](val filter: T => Boolean)
+    trait FilterContainer[T](val filter: T => Boolean)
 
     trait ReaderLayer[T] extends StreamReader[T]:
-      self: FromReader[T] with FilterLayer[T] =>
+      self: FromReader[T] with FilterContainer[T] =>
       override def readStream()(using Async): StreamResult[T] =
         var data = upstream.readStream()
-        // only continue if is right (item) and that item does not match the filter
+        // only continue looping if is right (item) and that item does not match the filter
         while data.exists(item => !filter(item)) do data = upstream.readStream()
         data
+
       override def pull(onItem: T => (Async) ?=> Boolean): StreamPull =
         upstream.pull(item => filter(item) && onItem(item))
 
-    trait ChannelLayer[T] extends ReadableStreamChannel[T]:
-      self: FromChannel[T] with FilterLayer[T] =>
+    trait ChannelLayer[T] extends ReadableStreamChannel[T] with ReaderLayer[T]:
+      self: FromChannel[T] with FilterContainer[T] =>
       override val readStreamSource: Async.Source[StreamResult[T]] =
         new SourceUtil.DerivedSource[StreamResult[T], StreamResult[T]](upstream.readStreamSource):
           selfSrc =>
@@ -301,11 +302,11 @@ private[stream] object PullLayers:
 
     trait ReaderTransformer[T](filter: T => Boolean) extends SingleSourceTransformer[StreamReader, T, T]:
       override def transformSingle(reader: StreamReader[T]): StreamReader[T] =
-        new ReaderLayer[T] with FromReader(reader) with FilterLayer(filter)
+        new ReaderLayer[T] with FromReader(reader) with FilterContainer(filter)
 
     trait ChannelTransformer[T](filter: T => Boolean) extends SingleSourceTransformer[ReadableStreamChannel, T, T]:
       override def transformSingle(channel: ReadableStreamChannel[T]): ReadableStreamChannel[T] =
-        new ChannelLayer[T] with ReaderLayer[T] with PullLayers.FromChannel[T](channel) with FilterLayer[T](filter)
+        new ChannelLayer[T] with FromChannel(channel) with FilterContainer(filter)
   end FilterLayer
 
   object TakeLayer:

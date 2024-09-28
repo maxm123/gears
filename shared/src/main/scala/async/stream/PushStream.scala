@@ -25,7 +25,7 @@ import scala.util.Try
   */
 type PushDestination[+S[-_], -T] = S[T] | Iterator[S[T]]
 
-trait PushSenderStream[+T] extends PushChannelStream[T] with PushSenderStreamOps[T] with StreamFamily.PushStreamOps[T]:
+trait PushSenderStream[+T] extends PushChannelStream[T] with StreamFamily.PushStreamOps[T]:
   override type ThisStream[+V] = PushSenderStream[V]
 
   def runToSender(sender: PushDestination[StreamSender, T])(using Async): Unit
@@ -169,7 +169,7 @@ private[stream] object PushLayers:
       self: ToSender[V] with MapLayer[T, V] =>
       override def send(x: T)(using Async): Unit = downstream.send(mapper(x))
 
-    trait ChannelLayer[T, V] extends SendableStreamChannel[T]:
+    trait ChannelLayer[T, V] extends SendableStreamChannel[T] with SenderLayer[T, V]:
       self: ToChannel[V] with MapLayer[T, V] =>
       override def sendSource(x: T): Async.Source[Channel.Res[Unit]] = downstream.sendSource(mapper(x))
 
@@ -180,7 +180,7 @@ private[stream] object PushLayers:
     trait ChannelTransformer[T, V](mapper: T => V)
         extends PushLayers.SingleDestTransformer[SendableStreamChannel, T, V]:
       override def transformSingle(channel: SendableStreamChannel[V]): SendableStreamChannel[T] =
-        new ChannelLayer[T, V] with SenderLayer[T, V] with ToSender(channel) with MapLayer(mapper)
+        new ChannelLayer[T, V] with ToSender(channel) with MapLayer(mapper)
   end MapLayer
 
   object FilterLayer:
@@ -203,7 +203,7 @@ private[stream] object PushLayers:
       self: ToSender[T] with FilterLayer[T] =>
       override def send(x: T)(using Async): Unit = if filter(x) then downstream.send(x)
 
-    trait ChannelLayer[T] extends SendableStreamChannel[T]:
+    trait ChannelLayer[T] extends SendableStreamChannel[T] with SenderLayer[T]:
       self: ToChannel[T] with FilterLayer[T] =>
       override def sendSource(x: T): Async.Source[Channel.Res[Unit]] =
         if filter(x) then downstream.sendSource(x)
@@ -216,7 +216,7 @@ private[stream] object PushLayers:
     trait ChannelTransformer[T](filter: T => Boolean)
         extends PushLayers.SingleDestTransformer[SendableStreamChannel, T, T]:
       override def transformSingle(channel: SendableStreamChannel[T]): SendableStreamChannel[T] =
-        new ChannelLayer[T] with SenderLayer[T] with FilterLayer(filter) with ToSender(channel)
+        new ChannelLayer[T] with FilterLayer(filter) with ToSender(channel)
   end FilterLayer
 
   object TakeLayer:
