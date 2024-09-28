@@ -63,7 +63,7 @@ trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
       val handle = reader.pull(item => { container = folder.add(container, item); true })
       var result: Option[StreamResult.Done] = None
 
-      while result.isEmpty do result = handle()
+      while result.isEmpty do result = handle.pull()
       if result.get.isInstanceOf[Throwable] then
         throw StreamResult.StreamTerminatedException(result.get.asInstanceOf[Throwable])
 
@@ -173,7 +173,7 @@ trait PullReaderStreamOps[+T] extends StreamOps[T]:
     // case (A) semi-terminal (closed) / (B) terminal (terminated or with Throwable cause)
 
     try
-      while result.isEmpty do result = handle()
+      while result.isEmpty do result = handle.pull()
 
       result.get match // case (1B) --> interrupt stream operation
         case _: StreamResult.Closed => {} // case (1A) --> just stop this single task silently
@@ -310,29 +310,52 @@ private[stream] object PullLayers:
   end FilterLayer
 
   object TakeLayer:
+    /** An onItem wrapper and StreamPull wrapper factory for communicating the silent rejection
+      *
+      * @param onItem
+      *   the downstream onItem
+      */
+    abstract class Pull[T](onItem: T => Async ?=> Boolean) extends (T => Async ?=> Boolean):
+      private var rejected: Boolean = false
+
+      protected def checkAndDecrement(): Boolean
+
+      override def apply(item: T): (Async) ?=> Boolean =
+        if checkAndDecrement() then onItem(item)
+        else
+          // upstream considers completed and returns None from handle -> must be known to handle wrapper
+          rejected = true
+          true
+
+      def createHandle(upstream: StreamReader[T]): StreamPull =
+        val handle = upstream.pull(this)
+
+        new StreamPull:
+          def pull()(using Async): Option[StreamResult.Done] =
+            // if previously rejected, keep consistent termination
+            if rejected then Some(StreamResult.Closed)
+            else
+              val res = handle.pull()
+              // if no item was passed downstream -> insert termination indicator
+              if rejected then Some(StreamResult.Closed)
+              else res
+    end Pull
+
     // can never know whether readStream() item result is already consumed (happens after return) -> do not terminate
     abstract class ReaderLayer[T](remaining: AtomicInteger) extends StreamReader[T]:
       self: FromReader[T] =>
 
       override def pull(onItem: T => (Async) ?=> Boolean): StreamPull =
-        val handle = upstream.pull: item =>
-          if remaining.getAndDecrement() > 0 then onItem(item)
-          else
-            remaining.set(0)
-            true
-
-        () => if remaining.get() > 0 then handle() else Some(StreamResult.Closed)
+        new Pull[T](onItem):
+          def checkAndDecrement(): Boolean = remaining.getAndDecrement() > 0 // decrementing below zero is fine
+        .createHandle(upstream)
 
       override def readStream()(using Async): StreamResult[T] =
-        if remaining.get() > 0 then
-          val result = upstream.readStream()
-          if result.isRight then
-            if remaining.getAndDecrement() > 0 then result
-            else
-              remaining.set(0)
-              Left(StreamResult.Closed)
-          else result
-        else Left(StreamResult.Closed)
+        val result = upstream.readStream()
+        if result.isRight then
+          if remaining.getAndDecrement() > 0 then result
+          else Left(StreamResult.Closed)
+        else result
     end ReaderLayer
 
     class ChannelCounter(var remaining: Int)
@@ -357,17 +380,16 @@ private[stream] object PullLayers:
             super.complete(k, data, source)
 
       override def pull(onItem: T => (Async) ?=> Boolean): StreamPull =
-        val handle = upstream.pull: item =>
-          lock.lock()
-          val doPass = if counter.remaining > 0 then
-            counter.remaining -= 1
-            true
-          else false
-          lock.unlock()
-
-          if doPass then onItem(item) else true
-
-        () => if counter.remaining > 0 then handle() else Some(StreamResult.Closed)
+        new Pull[T](onItem):
+          def checkAndDecrement(): Boolean =
+            lock.lock()
+            val doPass = if counter.remaining > 0 then
+              counter.remaining -= 1
+              true
+            else false
+            lock.unlock()
+            doPass
+        .createHandle(upstream)
 
       override def readStream()(using Async): StreamResult[T] =
         if counter.remaining > 0 then

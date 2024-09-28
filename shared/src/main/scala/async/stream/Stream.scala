@@ -178,12 +178,13 @@ object Stream:
       s.parallel(size.asInt, parallelism = parallelism)
 
   private class ArrayStreamReader[A](a: Array[A], var pos: Int, end: Int) extends StreamReader[A]:
-    override def pull(onItem: A => (Async) ?=> Boolean): StreamPull = () =>
-      while pos < end && !onItem(a(pos)) do pos += 1
-      if pos < end then
-        pos += 1 // after onItem returned true, the loop body is not evaluated -> increase now
-        None
-      else Some(StreamResult.Closed)
+    override def pull(onItem: A => (Async) ?=> Boolean): StreamPull = new StreamPull:
+      def pull()(using Async): Option[StreamResult.Done] =
+        while pos < end && !onItem(a(pos)) do pos += 1
+        if pos < end then
+          pos += 1 // after onItem returned true, the loop body is not evaluated -> increase now
+          None
+        else Some(StreamResult.Closed)
 
     override def readStream()(using Async): StreamResult.StreamResult[A] =
       if pos < end then

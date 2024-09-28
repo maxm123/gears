@@ -183,35 +183,37 @@ end SendableStreamChannel
 
 /** A handle to pull elements from a [[StreamReader]]. It is created once using [[StreamReader.pull]] and can be used
   * repeatedly to request more elements.
-  *
-  * When pulling, the producer blocks until a result is available and feeds it to the handler passed to
-  * [[StreamReader.pull]] until the item handler returns true or termination is reached.
-  *
-  * The pull returns [[None]] until termination of the source is reached. When the source returns a termination value,
-  * this may happen after zero or more onItem attempts (one successful at the most, as usual).
   */
-type StreamPull = () => Async ?=> Option[StreamResult.Done]
+trait StreamPull:
+  /** Request the producer to provide data, i.e., to repeatedly wait for data to be available and to feed it to the
+    * handler passed to [[StreamReader.pull]] until the handler returns true or termination is reached.
+    *
+    * @return
+    *   [[None]] if the handler accepted an element. Otherwise, if the end of the data is reached, the termination
+    *   value.
+    */
+  def pull()(using Async): Option[StreamResult.Done]
 
 /** Trait to mixin to a partial [[StreamReader]] implementation providing [[StreamReader.pull]]
   */
 trait GenReadStream[+T] extends StreamReader[T]:
   override def readStream()(using Async): StreamResult[T] =
     var res: StreamResult[T] = null
-    pull(x => { res = Right(x); true })() match
+    pull(x => { res = Right(x); true }).pull() match
       case None              => res
       case Some(termination) => Left(termination)
 
 /** Trait to mixin to a partial [[StreamReader]] implementation providing [[StreamReader.readStream]]
   */
 trait GenPull[+T] extends StreamReader[T]:
-  override def pull(onItem: T => (Async) ?=> Boolean): StreamPull = () =>
-    boundary:
+  override def pull(onItem: T => (Async) ?=> Boolean): StreamPull = new StreamPull:
+    def pull()(using Async): Option[StreamResult.Done] =
       while true do
         readStream() match
           case Left(terminated) =>
-            boundary.break(Some(terminated))
-          case Right(item) => if onItem(item) then boundary.break(None)
-      None
+            return Some(terminated)
+          case Right(item) => if onItem(item) then return None
+      null // unreachable
 
 trait StreamReader[+T]:
   /** Read an item from the channel, suspending until the item has been received.
