@@ -51,21 +51,25 @@ trait Family:
   type InnerFamily <: Family
 
   trait PushStreamOps[+T] extends PushSenderStreamOps[T]:
+    self: PushStream[T] =>
     override type ThisStream[+V] = PushStream[V]
     override type PushType[+V] = PushStream[V]
     override type PullType[+V] = PullStream[V]
     override type Result[+V] = fam.Result[V]
     override type InnerStream[+V] = StreamType.PushStream[InnerFamily, V]
 
+    override def thisStream: PushStream[T] = this
     override def parallel(bufferSize: Int, parallelism: Int): PushStream[T] =
       pulledThrough(bufferSize /* parHint ignored*/ ).toPushStream(parallelism)
 
   trait PullStreamOps[+T] extends PullReaderStreamOps[T]:
+    self: PullStream[T] =>
     override type ThisStream[+V] = PullStream[V]
     override type PushType[+V] = PushStream[V]
     override type PullType[+V] = PullStream[V]
     override type Result[+V] = fam.Result[V]
     override type InnerStream[+V] = StreamType.PullStream[InnerFamily, V]
 
+    override def thisStream: PullStream[T] = this
     override def parallel(bufferSize: Int, parallelism: Int): PullStream[T] =
       toPushStream().pulledThrough(bufferSize, parallelism)

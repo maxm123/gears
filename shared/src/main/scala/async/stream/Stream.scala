@@ -64,11 +64,24 @@ trait StreamOps[+T]:
 
   /** The more specific type of this stream that all streams of the same push/pull characteristic inhabit. Will usually
     * be either [[PushType]] or [[PullType]] depending on this stream's type.
+    *
+    * The self type is expected to conform to {{{ThisStream[T]}}} which is deferred to an explicit cast (using
+    * [[thisStream]]) as this type reference is cyclic.
     */
   type ThisStream[+V] <: StreamOps[V] { type Result[T] = self.Result[T] }
   type InnerStream[+V] <: StreamOps[V]
   type PushType[+V] <: PushSenderStreamOps[V] { type Result[T] = self.Result[T] }
   type PullType[+V] <: PullReaderStreamOps[V] { type Result[T] = self.Result[T] }
+
+  /** Return this stream itself, typed as [[ThisStream]].
+    *
+    * @see
+    *   [[ThisStream]]
+    *
+    * @return
+    *   this stream
+    */
+  def thisStream: ThisStream[T]
 
   /** Transform elements of this stream one by one
     *
