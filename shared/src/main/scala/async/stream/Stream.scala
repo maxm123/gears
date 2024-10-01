@@ -66,6 +66,7 @@ trait StreamOps[+T]:
     * be either [[PushType]] or [[PullType]] depending on this stream's type.
     */
   type ThisStream[+V] <: StreamOps[V] { type Result[T] = self.Result[T] }
+  type InnerStream[+V] <: StreamOps[V]
   type PushType[+V] <: PushSenderStreamOps[V] { type Result[T] = self.Result[T] }
   type PullType[+V] <: PullReaderStreamOps[V] { type Result[T] = self.Result[T] }
 
@@ -106,7 +107,7 @@ trait StreamOps[+T]:
     * @return
     *   a joined stream of the inner streams of each element
     */
-  def flatMap[V](outerParallelism: Int = 1)(mapper: T => ThisStream[V]): ThisStream[V]
+  def flatMap[V](outerParallelism: Int = 1)(mapper: T => InnerStream[V]): ThisStream[V]
 
   /** Run this stream, consuming and combining its elements using a given [[StreamFolder]].
     *
@@ -166,6 +167,7 @@ object StreamFamily extends Family:
   type FamilyOps[+T] = StreamOps[T]
   type PushStream[+T] = PushSenderStream[T]
   type PullStream[+T] = PullReaderStream[T]
+  type InnerFamily = StreamFamily.type
 
 type Stream[+T] = StreamOps[T] { type Result[+V] = Async ?=> V }
 
