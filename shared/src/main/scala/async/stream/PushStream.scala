@@ -44,9 +44,6 @@ trait PushSenderStream[+T] extends PushChannelStream[T] with StreamFamily.PushSt
 
   override def flatMap[V](outerParallelism: Int)(mapper: T => PushSenderStream[V]): PushSenderStream[V] =
     new PushLayers.FlatMapLayer.SenderMixer[T, V](mapper, outerParallelism, this)
-
-  override def toPushStream(): PushSenderStream[T] = this
-  override def toPushStream(parallelism: Int): PushSenderStream[T] = this
 end PushSenderStream
 
 trait PushSenderStreamOps[+T] extends StreamOps[T]:
@@ -54,7 +51,7 @@ trait PushSenderStreamOps[+T] extends StreamOps[T]:
   override type ThisStream[+V] <: PushSenderStreamOps[V] { type Result[T] = self.Result[T] }
   override type PushType[+V] = ThisStream[V]
 
-  override def toPullStream()(using size: BufferedStreamChannel.Size) = pulledThrough(size.asInt)
+  override def toPullStream(bufferSize: Int) = pulledThrough(bufferSize)
 
   /** Transform this push stream into a pull stream by creating an intermediary stream channel where all elements flow
     * through. This stream will be started asynchronously to run the pulling body synchronously.

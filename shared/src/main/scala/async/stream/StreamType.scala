@@ -59,6 +59,8 @@ trait Family:
     override type InnerStream[+V] = StreamType.PushStream[InnerFamily, V]
 
     override def thisStream: PushStream[T] = this
+    override def toPushStream(): PushStream[T] = this
+    override def toPushStream(parallelism: Int): PushStream[T] = this
     override def parallel(bufferSize: Int, parallelism: Int): PushStream[T] =
       pulledThrough(bufferSize /* parHint ignored*/ ).toPushStream(parallelism)
 
@@ -71,5 +73,6 @@ trait Family:
     override type InnerStream[+V] = StreamType.PullStream[InnerFamily, V]
 
     override def thisStream: PullStream[T] = this
+    override def toPullStream(bufferSize: Int): PullStream[T] = this
     override def parallel(bufferSize: Int, parallelism: Int): PullStream[T] =
       toPushStream().pulledThrough(bufferSize, parallelism)

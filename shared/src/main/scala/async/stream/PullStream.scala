@@ -87,8 +87,6 @@ trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
     catch case e: StreamResult.StreamTerminatedException => Failure(e.getCause())
   end fold
 
-  override def toPullStream()(using BufferedStreamChannel.Size): PullReaderStream[T] = this
-
   override def pushedBy[V](parallelism: Int)(
       task: (StreamReader[T], StreamSender[V]) => Async ?=> Unit
   ): PushSenderStream[V] =

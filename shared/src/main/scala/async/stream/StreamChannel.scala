@@ -315,10 +315,6 @@ class GenericStreamChannel[T](private val channel: Channel[StreamResult[T]]) ext
 end GenericStreamChannel
 
 object BufferedStreamChannel:
-  opaque type Size = Int
-  inline def size(size: Int): Size = size
-  extension (s: Size) inline def asInt: Int = s
-
   /** Create a [[StreamChannel]] operating on an internal buffer. It works exactly like [[BufferedChannel]] except for
     * the termination behavior of [[StreamChannel]]s.
     *

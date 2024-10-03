@@ -166,13 +166,15 @@ trait StreamOps[+T]:
   def toPushStream(parallelism: Int): PushType[T]
 
   /** Convert this stream to a pull stream, possibly decoupling the stream consumer the from the sender through
-    * concurrency and introduction of a channel. The size of that channel is taken from the context parameter. Note that
-    * it will be ignored if this stream is already a pull stream.
+    * concurrency and introduction of a channel. Note that this will be ignored if this stream is already a pull stream.
+    *
+    * @param bufferSize
+    *   the capacity of the buffered channel
     *
     * @return
-    *   a stream from which the elements of this stream can be pulled
+    *   a stream from which the elements of this stream can be pulled, possibly this stream
     */
-  def toPullStream()(using BufferedStreamChannel.Size): PullType[T]
+  def toPullStream(bufferSize: Int): PullType[T]
 end StreamOps
 
 object StreamFamily extends Family:
@@ -185,13 +187,6 @@ object StreamFamily extends Family:
 type Stream[+T] = StreamOps[T] { type Result[+V] = Async ?=> V }
 
 object Stream:
-  extension [T](s: Stream[T])
-    /** @see
-      *   [[Stream.parallel(bufferSize:Int*]]
-      */
-    inline def parallel(inline parallelism: Int)(using inline size: BufferedStreamChannel.Size): s.ThisStream[T] =
-      s.parallel(size.asInt, parallelism = parallelism)
-
   private class ArrayStreamReader[A](a: Array[A], var pos: Int, end: Int) extends StreamReader[A]:
     override def pull(onItem: A => (Async) ?=> Boolean): StreamPull = new StreamPull:
       def pull()(using Async): Option[StreamResult.Done] =
