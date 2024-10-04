@@ -268,7 +268,7 @@ private[stream] object PullLayers:
       override val readStreamSource: Async.Source[StreamResult[T]] =
         new SourceUtil.DerivedSource[StreamResult[T], StreamResult[T]](upstream.readStreamSource):
           selfSrc =>
-          override def transform(k: Listener[StreamResult[T]]): Listener[StreamResult[T]] =
+          override def transform(k: Listener[StreamResult[T]]) =
             new Listener.ForwardingListener[StreamResult[T]](this, k):
               override val lock: ListenerLock | Null = k.lock
               override def complete(data: StreamResult[T], source: Async.Source[StreamResult[T]]): Unit =

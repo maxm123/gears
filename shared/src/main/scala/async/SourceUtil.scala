@@ -11,14 +11,14 @@ private[async] object SourceUtil:
     */
   trait DerivedSource[+T, V](val src: Async.Source[V]) extends Async.Source[T]:
     /** Transform a Listener attached to [[poll]] and [[onComplete]]. It should extend
-      * `Listener.ForwardingListener(this, k)`
+      * `Listener.ForwardingListener(this, k)`. If not, a custom [[dropListener]] implementation must be provided.
       *
       * @param k
       *   the Listener attached to this Source
       * @return
       *   the Listener to attach to the upstream Source
       */
-    def transform(k: Listener[T]): Listener[V]
+    def transform(k: Listener[T]): Listener.ForwardingListener[V]
 
     override def poll(k: Listener[T]): Boolean =
       src.poll(transform(k))
