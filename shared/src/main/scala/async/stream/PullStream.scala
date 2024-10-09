@@ -121,7 +121,10 @@ trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
                       fut
                 futureIterator.foreach(_.await)
               if theSingle != null then theSingle.close()
-          catch case _: StreamResult.StreamTerminatedException => {} // main goal: to cancel Async.group
+          catch
+            case e: StreamResult.StreamTerminatedException =>
+              // if no cause, drop silently -> just break Async.group and cancel others
+              if e.getCause() != null then throw e
 end PullReaderStream
 
 trait PullReaderStreamOps[+T] extends StreamOps[T]:
