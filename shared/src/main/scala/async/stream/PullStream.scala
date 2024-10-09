@@ -30,6 +30,7 @@ import scala.util.Try
 type PullSource[+S[+_], +T] = S[T] | Iterator[S[T]]
 
 trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
+  import PullLayers.handleMaybeIt
   override type ThisStream[+V] = PullReaderStream[V]
 
   /** Create a resource of readers that can be used to retrieve the stream data. The stream can use this function to set
@@ -201,7 +202,7 @@ trait PullChannelStream[+T] extends PullReaderStream[T]:
   def channelTake(count: Int): PullChannelStream[T] =
     new PullLayers.ChannelMixer[T, T](this) with PullLayers.TakeLayer.ChannelTransformer[T](count)
 
-private[stream] object PullLayers:
+object PullLayers extends TransformLayers:
   trait SourceTransformer[S[+_] <: StreamReader[_], -T, +V]:
     def transform(reader: PullSource[S, T]): PullSource[S, V]
 
@@ -227,7 +228,7 @@ private[stream] object PullLayers:
   type FromReader[V] = FromAnyReader[StreamReader, V]
   type FromChannel[V] = FromAnyReader[ReadableStreamChannel, V]
 
-  object MapLayer:
+  private[stream] object MapLayer:
     trait MapContainer[T, V](val mapper: T => V)
 
     trait ReaderLayer[T, V] extends StreamReader[V]:
@@ -249,7 +250,7 @@ private[stream] object PullLayers:
         new ChannelLayer[T, V] with FromChannel(channel) with MapContainer(mapper)
   end MapLayer
 
-  object FilterLayer:
+  private[stream] object FilterLayer:
     trait FilterContainer[T](val filter: T => Boolean)
 
     trait ReaderLayer[T] extends StreamReader[T]:
@@ -307,7 +308,7 @@ private[stream] object PullLayers:
         new ChannelLayer[T] with FromChannel(channel) with FilterContainer(filter)
   end FilterLayer
 
-  object TakeLayer:
+  private[stream] object TakeLayer:
     /** An onItem wrapper and StreamPull wrapper factory for communicating the silent rejection
       *
       * @param onItem
@@ -416,7 +417,7 @@ private[stream] object PullLayers:
         mapMaybeIt(channel)(ch => new ChannelLayer[T](counter, lock) with FromChannel(ch))
   end TakeLayer
 
-  object FlatMapLayer:
+  private[stream] object FlatMapLayer:
     final class StreamCell[+T] private (
         handle: (PullSource[StreamReader, T], Async ?=> Unit),
         private var remaining: Int

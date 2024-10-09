@@ -131,7 +131,7 @@ trait PushChannelStream[+T]:
       ref.get().get
   end fold
 
-private[stream] object PushLayers:
+object PushLayers extends TransformLayers:
   trait DestTransformer[S[-_] <: StreamSender[_], -T, +V]:
     def transform(sender: PushDestination[S, V]): PushDestination[S, T]
 
@@ -159,7 +159,7 @@ private[stream] object PushLayers:
     self: ToAnySender[?, ?] =>
     override def terminate(value: StreamResult.Done): Boolean = downstream.terminate(value)
 
-  object MapLayer:
+  private[stream] object MapLayer:
     trait MapLayer[T, V](val mapper: T => V)
 
     trait SenderLayer[T, V] extends ForwardTerminate[T]:
@@ -180,7 +180,7 @@ private[stream] object PushLayers:
         new ChannelLayer[T, V] with ToSender(channel) with MapLayer(mapper)
   end MapLayer
 
-  object FilterLayer:
+  private[stream] object FilterLayer:
     val NoopRes: Channel.Res[Unit] = Right(())
     val NoopOption: Option[Channel.Res[Unit]] = Some(NoopRes)
     val NoopSource = new Async.Source[Channel.Res[Unit]]:
@@ -216,7 +216,7 @@ private[stream] object PushLayers:
         new ChannelLayer[T] with FilterLayer(filter) with ToSender(channel)
   end FilterLayer
 
-  object TakeLayer:
+  private[stream] object TakeLayer:
     trait TakeLayer(val count: Int)
 
     abstract class SenderLayer[T](remaining: AtomicInteger, remainingSent: AtomicInteger) extends ForwardTerminate[T]:
@@ -287,7 +287,7 @@ private[stream] object PushLayers:
         mapMaybeIt(channel)(c => new ChannelLayer[T](counter, sentCounter, lock) with ToSender(c))
   end TakeLayer
 
-  object FlatMapLayer:
+  private[stream] object FlatMapLayer:
     trait ConcatMapper[T, V](val mapper: T => PushSenderStream[V])
 
     // as there is only one outer sender per flatmap, it can contain all the global data

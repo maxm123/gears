@@ -46,14 +46,15 @@ object StreamFolder:
         c1.merged(c2) { case ((k, v1), (_, v2)) => (k, combine(k, v1, v2)) }
     }
 
-private[stream] inline def handleMaybeIt[S[_], T, V](
-    source: S[T] | Iterator[S[T]]
-)(inline single: S[T] => V)(inline iterator: Iterator[S[T]] => V): V =
-  if source.isInstanceOf[S[T]] then single(source.asInstanceOf[S[T]])
-  else iterator(source.asInstanceOf[Iterator[S[T]]])
+private[stream] trait TransformLayers:
+  inline def handleMaybeIt[S[_], T, V](
+      source: S[T] | Iterator[S[T]]
+  )(inline single: S[T] => V)(inline iterator: Iterator[S[T]] => V): V =
+    if source.isInstanceOf[S[T]] then single(source.asInstanceOf[S[T]])
+    else iterator(source.asInstanceOf[Iterator[S[T]]])
 
-private[stream] inline def mapMaybeIt[S[_], T, V](source: S[T] | Iterator[S[T]])(single: S[T] => S[V]) =
-  handleMaybeIt(source)(single)(_.map(single))
+  inline def mapMaybeIt[S[_], T, V](source: S[T] | Iterator[S[T]])(single: S[T] => S[V]) =
+    handleMaybeIt(source)(single)(_.map(single))
 
 trait StreamOps[+T]:
   self =>
