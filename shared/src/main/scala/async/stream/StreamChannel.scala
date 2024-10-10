@@ -6,6 +6,7 @@ import gears.async.Channel.Res
 import gears.async.ChannelSender
 import gears.async.Listener
 import gears.async.ReadableChannel
+import gears.async.Semaphore
 import gears.async.SendableChannel
 import gears.async.SourceUtil
 
@@ -73,6 +74,22 @@ trait StreamSender[-T] extends ChannelSender[T], java.io.Closeable:
     *   [[SendableChannel.send]]
     */
   def send(x: T)(using Async): Unit
+
+object StreamSender:
+  /** Create a thread-safe wrapper that synchronizes data sends to a given sender. Termination is not synchronized.
+    *
+    * @param sender
+    *   the sender to forward requests to.
+    * @return
+    *   a thread-safe wrapper that forwards the data to the given sender.
+    */
+  def synchronizedSender[T](sender: StreamSender[T]) = new StreamSender[T]:
+    val lock = Semaphore(1)
+    def send(x: T)(using Async): Unit =
+      val guard = lock.acquire()
+      try sender.send(x)
+      finally guard.release()
+    def terminate(value: StreamResult.Done): Boolean = sender.terminate(value)
 
 trait SendableStreamChannel[-T] extends SendableChannel[T], StreamSender[T]
 

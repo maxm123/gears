@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.Lock
 import java.util.concurrent.locks.ReentrantLock
+import scala.collection.AbstractIterator
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Try
 
@@ -44,6 +45,9 @@ trait PushSenderStream[+T] extends PushChannelStream[T] with StreamFamily.PushSt
 
   override def flatMap[V](outerParallelism: Int)(mapper: T => PushSenderStream[V]): PushSenderStream[V] =
     new PushLayers.FlatMapLayer.SenderMixer[T, V](mapper, outerParallelism, this)
+
+  override def merge[V >: T](other: PushSenderStream[V]): PushSenderStream[V] =
+    new PushLayers.MergeLayer.SenderSplitter(this, other)
 end PushSenderStream
 
 trait PushSenderStreamOps[+T] extends StreamOps[T]:
@@ -66,6 +70,15 @@ trait PushSenderStreamOps[+T] extends StreamOps[T]:
     *   BufferedStreamChannel
     */
   def pulledThrough(bufferSize: Int, parHint: Int = 1): PullType[T]
+
+  /** Merge the elements of this stream with those of another. They are combined in no particular order.
+    *
+    * @param other
+    *   the other stream
+    * @return
+    *   a stream combining the elements of both streams (this and other)
+    */
+  def merge[V >: T](other: ThisStream[V]): ThisStream[V]
 end PushSenderStreamOps
 
 trait PushChannelStream[+T]:
@@ -410,4 +423,46 @@ object PushLayers extends TransformLayers:
         try upstream.runToSender(outerSender)
         finally outerSender.closeInner()
   end FlatMapLayer
+
+  private[stream] object MergeLayer:
+    private class CapturingIterator[T](base: Iterator[T]) extends AbstractIterator[T]:
+      private[this] var hd: T = _
+      private[this] var hdDefined: Boolean = false
+
+      def hasNext =
+        if hdDefined then true
+        else
+          base.synchronized:
+            if base.hasNext then
+              hd = base.next()
+              hdDefined = true
+              true
+            else false
+
+      def next() =
+        hdDefined = false
+        hd
+    end CapturingIterator
+
+    class SenderSplitter[T](base1: PushSenderStream[T], base2: PushSenderStream[T]) extends PushSenderStream[T]:
+      def runToSender(sender: PushDestination[StreamSender, T])(using Async): Unit =
+        val (sender1, sender2) = handleMaybeIt(sender)(s => (s, s)): iterator =>
+          val s1 = iterator.next()
+          if iterator.hasNext then
+            // multiple senders exist -> reserve one for each stream, distribute the rest on demand
+            val s2 = iterator.next()
+            val i1: Iterator[StreamSender[T]] = CapturingIterator(iterator) // captures one element for multithreaded
+            val i2: Iterator[StreamSender[T]] = CapturingIterator(iterator) //              hasNext-next coordination
+            (Iterator(s1) ++ i1, Iterator(s2) ++ i2)
+          else
+            // only one single sender exists -> synchronize access
+            val safeSender = StreamSender.synchronizedSender(s1)
+            (safeSender, safeSender)
+
+        Async.group:
+          val f1 = Future(base1.runToSender(sender1))
+          val f2 = Future(base2.runToSender(sender2))
+          Seq(f1, f2).awaitAll
+
+  end MergeLayer
 end PushLayers
