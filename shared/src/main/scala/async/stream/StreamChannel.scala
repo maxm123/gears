@@ -3,19 +3,19 @@ package gears.async.stream
 import gears.async.Async
 import gears.async.Channel
 import gears.async.Channel.Res
+import gears.async.ChannelClosedException
 import gears.async.ChannelSender
 import gears.async.Listener
 import gears.async.ReadableChannel
 import gears.async.Semaphore
 import gears.async.SendableChannel
 import gears.async.SourceUtil
+import gears.async.listeners.lockBoth
 
 import java.util.concurrent.locks.ReadWriteLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
+import scala.collection.mutable
 import scala.util.Failure
-import scala.util.Success
-import scala.util.Try
-import scala.util.boundary
 
 import StreamResult.StreamResult
 
@@ -342,37 +342,215 @@ object BufferedStreamChannel:
     */
   def apply[T](size: Int): StreamChannel[T] = Impl(size)
 
+  private[async] abstract class ImplBase[T] extends StreamChannel[T] with GenPull[T]:
+    protected type ReadResult = StreamResult[T]
+    protected type SendResult = Res[Unit]
+    protected type Reader = Listener[ReadResult]
+    protected type Sender = Listener[SendResult]
+
+    var finalResult: StreamResult[T] = null
+    val cells = CellBuf()
+    // Poll a reader, returning false if it should be put into queue
+    def pollRead(r: Reader): Boolean
+    // Poll a reader, returning false if it should be put into queue
+    def pollSend(src: CanSend, s: Sender): Boolean
+
+    def pollRead(): Option[StreamResult[T]]
+    def pollSend(item: T): Option[SendResult]
+
+    protected final def checkSendClosed(src: Async.Source[Res[Unit]], l: Sender): Boolean =
+      if finalResult != null then
+        l.completeNow(Left(Channel.Closed), src)
+        true
+      else false
+
+    protected final def checkReadClosed(l: Reader): Boolean =
+      if finalResult != null then
+        l.completeNow(finalResult, readStreamSource)
+        true
+      else false
+
+    override val readStreamSource: Async.Source[ReadResult] = new Async.Source {
+      override def poll(k: Reader): Boolean = pollRead(k)
+      override def poll(): Option[StreamResult[T]] = pollRead()
+      override def onComplete(k: Reader): Unit = ImplBase.this.synchronized:
+        if !pollRead(k) then cells.addReader(k)
+      override def dropListener(k: Reader): Unit = ImplBase.this.synchronized:
+        cells.dropReader(k)
+    }
+    override final def sendSource(x: T): Async.Source[SendResult] = CanSend(x)
+
+    override def send(x: T)(using ac: Async): Unit =
+      if pollSend(x).getOrElse(ac.await(sendSource(x))).isLeft then throw new ChannelClosedException()
+
+    override def readStream()(using ac: Async): StreamResult[T] =
+      pollRead().getOrElse(ac.await(readStreamSource))
+
+    override def terminate(value: StreamResult.Done): Boolean = ImplBase.this.synchronized:
+      if finalResult == null then
+        finalResult = Left(value)
+        cells.cancelSender()
+        true
+      else false
+
+    /** Complete a pair of locked sender and reader. */
+    protected final def complete(src: CanSend, reader: Listener[ReadResult], sender: Listener[SendResult]) =
+      reader.complete(Right(src.item), readStreamSource)
+      sender.complete(Right(()), src)
+
+    // Not a case class because equality should be referential, as otherwise
+    // dependent on a (possibly odd) equality of T. Users do not expect that
+    // cancelling a send of a given item might in fact cancel that of an equal one.
+    protected final class CanSend(val item: T) extends Async.Source[SendResult] {
+      override def poll(k: Listener[SendResult]): Boolean = pollSend(this, k)
+      override def poll(): Option[SendResult] = pollSend(item)
+      override def onComplete(k: Listener[SendResult]): Unit = ImplBase.this.synchronized:
+        if !pollSend(this, k) then cells.addSender(this, k)
+      override def dropListener(k: Listener[SendResult]): Unit = ImplBase.this.synchronized:
+        cells.dropSender(this, k)
+    }
+
+    /** CellBuf is a queue of cells, which consists of a sleeping sender or reader. The queue always guarantees that
+      * there are *only* all readers or all senders. It must be externally synchronized.
+      */
+    private[async] class CellBuf():
+      type Cell = Reader | (CanSend, Sender)
+      // reader == 0 || sender == 0 always
+      private var reader = 0
+      private var sender = 0
+
+      private val pending = mutable.Queue[Cell]()
+
+      /* Boring push/pop methods */
+
+      def hasReader = reader > 0
+      def hasSender = sender > 0
+      def nextReader =
+        require(reader > 0)
+        pending.head.asInstanceOf[Reader]
+      def nextSender =
+        require(sender > 0)
+        pending.head.asInstanceOf[(CanSend, Sender)]
+      def dequeue() =
+        val res = pending.dequeue()
+        if reader > 0 then reader -= 1 else sender -= 1
+        res
+      def addReader(r: Reader): this.type =
+        require(sender == 0)
+        reader += 1
+        pending.enqueue(r)
+        this
+      def addSender(src: CanSend, s: Sender): this.type =
+        require(reader == 0)
+        sender += 1
+        pending.enqueue((src, s))
+        this
+      def dropReader(r: Reader): this.type =
+        if reader > 0 then if pending.removeFirst(_ == r).isDefined then reader -= 1
+        this
+      def dropSender(src: CanSend, s: Sender): this.type =
+        if sender > 0 then if pending.removeFirst(_ == (src, s)).isDefined then sender -= 1
+        this
+
+      /** Match a possible reader to a queue of senders: try to go through the queue with lock pairing, stopping when
+        * finding a good pair.
+        */
+      def matchReader(r: Reader): Boolean =
+        while hasSender do
+          val (src, s) = nextSender
+          tryComplete(src, s)(r) match
+            case ()                        => return true
+            case listener if listener == r => return true
+            case _                         => dequeue() // drop gone sender from queue
+        false
+
+      /** Match a possible sender to a queue of readers: try to go through the queue with lock pairing, stopping when
+        * finding a good pair.
+        */
+      def matchSender(src: CanSend, s: Sender): Boolean =
+        while hasReader do
+          val r = nextReader
+          tryComplete(src, s)(r) match
+            case ()                        => return true
+            case listener if listener == s => return true
+            case _                         => dequeue() // drop gone reader from queue
+        false
+
+      private inline def tryComplete(src: CanSend, s: Sender)(r: Reader): s.type | r.type | Unit =
+        lockBoth(r, s) match
+          case true =>
+            ImplBase.this.complete(src, r, s)
+            dequeue() // drop completed reader/sender from queue
+            ()
+          case listener: (r.type | s.type) => listener
+
+      private inline def cancel[U](count: Int)(inline f: Cell => U): Unit =
+        if count > 0 then
+          pending.foreach(f)
+          pending.clear()
+          reader = 0
+          sender = 0
+
+      def cancelSender() =
+        cancel(sender) {
+          case (src, s) => s.completeNow(Left(Channel.Closed), src)
+          case _        => ()
+        }
+
+      def cancelReader() =
+        cancel(reader) {
+          case r: Reader => r.completeNow(ImplBase.this.finalResult, readStreamSource)
+          case _         => ()
+        }
+    end CellBuf
+  end ImplBase
+
   // notable differences to BufferedChannel.Impl:
   //  - finalResults for check and to replace Left(Closed) on read --> new checkSendClosed method
   //  - in pollRead, close checking moved from 'before buffer checking' to 'after buffer checking'
-  private class Impl[T](size: Int) extends Channel.Impl[T] with StreamChannel[T] with GenPull[T]:
+  private class Impl[T](size: Int) extends ImplBase[T]:
     require(size > 0, "Buffered channels must have a buffer size greater than 0")
-    val buf = new scala.collection.mutable.Queue[T](size)
-    var finalResult: StreamResult[T] = null
+    val buf = new mutable.Queue[T](size)
 
     // Match a reader -> check space in buf -> fail
     override def pollSend(src: CanSend, s: Sender): Boolean = synchronized:
       checkSendClosed(src, s) || cells.matchSender(src, s) || senderToBuf(src, s)
 
+    override def pollSend(item: T): Option[SendResult] = synchronized:
+      if finalResult != null then Some(Left(Channel.Closed))
+      else
+        val element = Right(item)
+        while cells.hasReader do
+          // can remove reader b/c it's either gone or the operation will succeed
+          if cells.dequeue().asInstanceOf[Reader].completeNow(element, readStreamSource) then return Some(Right(()))
+        if buf.size < size then
+          buf += item
+          Some(Right(()))
+        else None
+
     // Check space in buf -> fail
     // If we can pop from buf -> try to feed a sender
     override def pollRead(r: Reader): Boolean = synchronized:
       if !buf.isEmpty then
-        if r.completeNow(Right(buf.head), readSource) then
+        if r.completeNow(Right(buf.head), readStreamSource) then
           buf.dequeue()
           if cells.hasSender then
-            val (src, s) = cells.nextSender
-            cells.dequeue() // buf always has space available after dequeue
+            val (src, s) =
+              cells.dequeue().asInstanceOf[(CanSend, Sender)] // buf always has space available after dequeue
             senderToBuf(src, s)
+          else if buf.isEmpty && finalResult != null then cells.cancelReader()
         true
-      else checkSendClosed(readSource, r)
+      else checkReadClosed(r)
 
-    // if the stream is terminated, complete the listener and indicate listener completion (true)
-    def checkSendClosed[V](src: Async.Source[Res[V]], l: Listener[Res[V]]): Boolean =
-      if finalResult != null then
-        l.completeNow(Left(Channel.Closed), src)
-        true
-      else false
+    override def pollRead(): Option[StreamResult[T]] = synchronized:
+      buf.removeHeadOption() match
+        case Some(value) =>
+          if cells.hasSender then
+            val (src, s) =
+              cells.dequeue().asInstanceOf[(CanSend, Sender)] // buf always has space available after dequeue
+            senderToBuf(src, s)
+          Some(Right(value))
+        case None => Option(finalResult)
 
     // Try to add a sender to the buffer
     def senderToBuf(src: CanSend, s: Sender): Boolean =
@@ -381,14 +559,9 @@ object BufferedStreamChannel:
         true
       else false
 
-    override val readStreamSource: Async.Source[StreamResult[T]] =
-      readSource.transformValuesWith(_.orElse(finalResult))
-
     override def terminate(value: StreamResult.Done): Boolean = synchronized:
-      if finalResult == null then
-        finalResult = Left(value)
-        cells.cancel()
-        true
-      else false
+      val terminated = super.terminate(value)
+      if terminated && buf.isEmpty then cells.cancelReader()
+      terminated
   end Impl
 end BufferedStreamChannel
