@@ -95,6 +95,7 @@ trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
     new PushSenderStream[V]:
       override def runToSender(senders: PushDestination[StreamSender, V])(using Async): Unit =
         toReader(parallelism).use: readers =>
+          var theSingle: StreamSender[V] = null // used for closing: single may only be closed at the very end
           try
             if parallelism == 1 then
               val r = handleMaybeIt(readers)(identity)(_.next)
@@ -103,7 +104,6 @@ trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
               s.close()
             else
               val ri = handleMaybeIt(readers)(Iterator.continually)(identity)
-              var theSingle: StreamSender[V] = null // used for closing: single may only be closed at the very end
               val si = handleMaybeIt(senders) { single =>
                 theSingle = single
                 Iterator.continually(single)
@@ -120,11 +120,12 @@ trait PullReaderStream[+T] extends StreamFamily.PullStreamOps[T]:
                       fut.onComplete(Listener { (_, _) => s.close() })
                       fut
                 futureIterator.foreach(_.await)
-              if theSingle != null then theSingle.close()
+              // if theSingle != null then theSingle.close()
           catch
             case e: StreamResult.StreamTerminatedException =>
               // if no cause, drop silently -> just break Async.group and cancel others
               if e.getCause() != null then throw e
+          finally if theSingle != null then theSingle.close()
 end PullReaderStream
 
 trait PullReaderStreamOps[+T] extends StreamOps[T]:
