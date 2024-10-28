@@ -232,6 +232,20 @@ trait GenPull[+T] extends StreamReader[T]:
           case Right(item) => if onItem(item) then return None
       null // unreachable
 
+/** Utility to read streams from StreamReader using [[StreamReader.pull]]. The employed handler stores the item within
+  * this instance to be retrieved afterwards. Consequently, this reader is not thread-safe.
+  */
+class PullReader[+T](reader: StreamReader[T]):
+  private var current: T = _
+  lazy val handle = reader.pull: item =>
+    current = item
+    true
+
+  inline def pull()(using Async) = handle.pull()
+  inline def value = current
+  def pullEither()(using Async): StreamResult[T] = handle.pull().toLeft(current)
+end PullReader
+
 trait StreamReader[+T]:
   /** Read an item from the channel, suspending until the item has been received.
     */

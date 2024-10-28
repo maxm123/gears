@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.Lock
 import java.util.concurrent.locks.ReentrantLock
 import scala.collection.mutable.ArrayBuffer
+import scala.jdk.CollectionConverters.SeqHasAsJava
 import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
@@ -423,14 +424,19 @@ object PullLayers extends TransformLayers:
 
   private[stream] object FlatMapLayer:
     final class StreamCell[+T] private (
+        outerGuard: Semaphore.Guard,
         handle: (PullSource[StreamReader, T], Async ?=> Unit),
         private var remaining: Int
     ):
       private val sources = handle._1
       private var openCount: Int = 0 // (count successful acquire) - (count release) - 1 * (is handle released)
 
-      def this(res: Resource[PullSource[StreamReader, T]], innerParallelism: Int)(using Async) =
-        this(res.allocated, innerParallelism)
+      def this(
+          outerGuard: Semaphore.Guard,
+          res: Resource[PullSource[StreamReader, T]],
+          innerParallelism: Int
+      )(using Async) =
+        this(outerGuard, res.allocated, innerParallelism)
 
       def acquire(): StreamReader[T] =
         synchronized:
@@ -441,16 +447,18 @@ object PullLayers extends TransformLayers:
             res
           else null
 
-      private inline def release0(inline check: => Boolean)(using Async): Unit =
+      private def release0(check: => Boolean)(using Async): Unit =
         val shouldClose = synchronized:
           if check then
             openCount = -1
             true
           else false
-        if shouldClose then handle._2
+        if shouldClose then
+          handle._2
+          outerGuard.release()
 
       // check for upstream closing after early termination of reader iterator. to be called when acquire fails.
-      // TODO could be merged with acquire because there is no critical section (would be reason not to block in acquire)
+      // could be merged with acquire because there is no critical section (would be reason not to block in acquire)
       def onAcquireFailed()(using Async): Unit = release0 { openCount == 0 }
 
       // release a reader from previous successful acquire. possibly closes the reader resource if this was the last.
@@ -468,39 +476,61 @@ object PullLayers extends TransformLayers:
       def releaseNow()(using Async) = release0 { openCount >= 0 }
     end StreamCell
 
-    abstract class StreamContext[T, V] private (
-        outerPullGuard: Semaphore,
+    class StreamContext[T, V](
         innerParallelism: Int,
+        outerReaders: ConcurrentLinkedQueue[PullReader[T]], // always: size < outerPullGuard.permits
         mapper: T => PullReaderStream[V]
     ):
+      // a permit is acquired before reading outer stream, held while inner stream open, leaked when outer stream done
+      val outerPullGuard = Semaphore(outerReaders.size())
+      // to avoid waiting on permanently empty semaphore: decrease counter when leaking, complete future when zero
+      val outerRemaining = AtomicInteger(outerReaders.size())
+      val outerDone = Future.Promise[Unit]()
+
       @volatile var cancelled = false
+
       val innerCells = ConcurrentLinkedQueue[StreamCell[V]]() // external use: peek() and remove(item)
       private val linkedReaders = ArrayBuffer[ReaderLayer[T, V]]() // synchronized with its object monitor
 
-      def this(outerParallelism: Int, innerParallelism: Int, mapper: T => PullReaderStream[V]) =
-        this(Semaphore(outerParallelism), innerParallelism, mapper)
+      def this(
+          outerParallelism: Int,
+          innerParallelism: Int,
+          outerReaders: Iterator[StreamReader[T]],
+          mapper: T => PullReaderStream[V]
+      ) = this(
+        innerParallelism,
+        ConcurrentLinkedQueue(outerReaders.take(outerParallelism).map(new PullReader(_)).toSeq.asJava),
+        mapper
+      )
 
-      // may return null after returnOuter(null)
-      protected def getOuter(): StreamReader[T]
-      // must be called for every reader returned by getOuter(); unless it returned termination: then call with null
-      protected def returnOuter(reader: StreamReader[T]): Unit
+      def this(
+          outerParallelism: Int,
+          innerParallelism: Int,
+          outerReader: StreamReader[T],
+          mapper: T => PullReaderStream[V]
+      ) = this(outerParallelism, innerParallelism, Iterator.continually(outerReader), mapper)
 
       // requires outer != null. returns cell (on success) or result (to close down) or null (retry).
-      // needs to be called with semaphore held. releases outer (to releaseOuter).
-      private inline def acquireFrom(outer: StreamReader[T])(using Async) =
-        outer.readStream() match
-          case Right(value) =>
-            returnOuter(outer)
-            val cell = StreamCell(mapper(value).toReader(innerParallelism), innerParallelism)
-            this.innerCells.add(cell) // release semaphore only after added to innerCells to keep outerParallelism
+      // needs to be called with semaphore held. releases outer.
+      private inline def acquireFrom(outer: PullReader[T], guard: Semaphore.Guard)(using Async) =
+        outer.pull() match
+          case None =>
+            val value = outer.value
+            outerReaders.add(outer)
+
+            val cell = StreamCell(guard, mapper(value).toReader(innerParallelism), innerParallelism)
+            this.innerCells.add(cell)
             if cancelled then
               cell.releaseNow()
               throw new IllegalStateException("using reader after resource released")
             cell
-          case termination @ Left(result) =>
-            returnOuter(null)
+          case Some(result) =>
+            // do not add back, leak guard, but decrement to avoid awaiting drained semaphore
+            if outerRemaining.decrementAndGet() == 0 then outerDone.complete(Success(()))
+
             if result != StreamResult.Closed then // i.e., terminated or failed
-              while getOuter() != null do returnOuter(null) // drain remaining readers
+              while outerReaders.poll() != null do () // drain remaining readers
+              outerDone.complete(Success(()))
 
             result match
               case _: StreamResult.Closed     => null // there may be other readers remaining -> retry
@@ -508,25 +538,30 @@ object PullLayers extends TransformLayers:
                 // no more upstream readers available -> close requesting reader,
                 // but do not send termination downstream because running inner streams may continue
                 Left(StreamResult.Closed)
-              case _: Throwable => termination.asInstanceOf[StreamResult[V]] // forward immediately
+              case t: Throwable => Left(t) // forward immediately
       end acquireFrom
 
-      def acquireCell()(using Async): StreamCell[V] | StreamResult[V] =
-        val guard = outerPullGuard.acquire()
-        try
-          while true do
-            // first check innerCells again (synchronized with outer.readStream() case Right) for strict outerParallelism
-            val cell = innerCells.peek()
-            if cell != null then return cell
+      def acquireCell()(using Async): StreamCell[V] | Left[StreamResult.Done, V] =
+        Async.race(outerPullGuard, outerDone).awaitResult match
+          case guard: Semaphore.Guard =>
+            while true do
+              // first check innerCells again (synchronized with outer.readStream() case Right) for strict outerParallelism
+              val cell = innerCells.peek()
+              if cell != null then
+                guard.release()
+                return cell
 
-            val outer = getOuter()
+              val outer = outerReaders.poll()
+              if outer == null then return Left(StreamResult.Closed) // concurrently drained
+
+              acquireFrom(outer, guard) match
+                case null => () // loop
+                case res  => return res /* cell or result */
+            end while
+            null // unreachable
+          case _ =>
             // if outer stream is done and we cannot get more data -> close requesting reader down
-            if outer == null then return Left(StreamResult.Closed)
-
-            val res = acquireFrom(outer)
-            if res != null then return res // otherwise loop again
-          null // unreachable
-        finally guard.release()
+            Left(StreamResult.Closed)
       end acquireCell
 
       def linkReader(reader: ReaderLayer[T, V]) =
@@ -556,46 +591,13 @@ object PullLayers extends TransformLayers:
       end cancelAll
     end StreamContext
 
-    class SingleStreamContext[T, V](
-        private var reader: StreamReader[T],
-        outerParallelism: Int,
-        innerParallelism: Int,
-        mapper: T => PullReaderStream[V]
-    ) extends StreamContext[T, V](outerParallelism, innerParallelism, mapper):
-      protected def getOuter(): StreamReader[T] = reader
-      protected def returnOuter(reader: StreamReader[T]): Unit =
-        if reader == null then this.reader = null // if reader is terminated, never return it again
-
-    private def mkQueueIteratorStreamContext[T](readers: Iterator[StreamReader[T]], outerParallelism: Int) =
-      val queue = ConcurrentLinkedQueue[StreamReader[T]]()
-      readers.take(outerParallelism).foreach(queue.add)
-      queue
-
-    class IteratorStreamContext[T, V] private (
-        readers: ConcurrentLinkedQueue[StreamReader[T]],
-        innerParallelism: Int,
-        mapper: T => PullReaderStream[V]
-    ) extends StreamContext[T, V](readers.size(), innerParallelism, mapper):
-
-      def this(
-          readers: Iterator[StreamReader[T]],
-          outerParallelism: Int,
-          innerParallelism: Int,
-          mapper: T => PullReaderStream[V]
-      ) =
-        this(mkQueueIteratorStreamContext(readers, outerParallelism), innerParallelism, mapper)
-
-      protected def getOuter(): StreamReader[T] = readers.poll()
-      protected def returnOuter(reader: StreamReader[T]): Unit =
-        if reader != null then readers.add(reader)
-
     class ReaderLayer[T, V](ctx: StreamContext[T, V]) extends StreamReader[V] with GenPull[V]:
       var cell: StreamCell[V] = null
       var reader: StreamReader[V] = null
 
       ctx.linkReader(this) // link in constructor to dispose captured cell on cancellation
 
-      private def acquireReader()(using Async): Boolean =
+      private def acquireReader0()(using Async): Boolean =
         if cell == null then cell = ctx.innerCells.peek()
         // reader = null
 
@@ -611,27 +613,52 @@ object PullLayers extends TransformLayers:
             ctx.innerCells.remove(cell)
           cell = ctx.innerCells.peek()
         false // ctx.innerCells is empty
-      end acquireReader
+      end acquireReader0
+
+      private def ensureReader()(using Async): Left[StreamResult.Done, V] =
+        while reader == null && !acquireReader0() do
+          ctx.acquireCell() match
+            case cell: StreamCell[V]                => this.cell = cell
+            case result: Left[StreamResult.Done, V] => return result
+        null
+
+      // returns true if result should be handed downstream
+      private def onInnerClosed(close: StreamResult.Done)(using Async): Boolean =
+        reader = null
+        if close == StreamResult.Closed then cell.release()
+        else
+          cell.releaseTerminated()
+          if close.isInstanceOf[Throwable] then return true
+        false
 
       override def readStream()(using Async): StreamResult[V] =
         while true do
-          while reader == null && !acquireReader() do
-            ctx.acquireCell() match
-              case cell: StreamCell[V]     => this.cell = cell
-              case result: StreamResult[V] => return result
+          val res = ensureReader()
+          if res != null then return res
 
           reader.readStream() match
-            case res @ Right(_) => return res
-            case res @ Left(close) =>
-              reader = null
-              if close == StreamResult.Closed then cell.release()
-              else
-                cell.releaseTerminated()
-                if close.isInstanceOf[Throwable] then return res
+            case res @ Right(_)    => return res
+            case res @ Left(close) => if onInnerClosed(close) then return res
         null // unreachable
       end readStream
 
-      // TODO how do to pull(handler): PullHandle? I don't know.
+      override def pull(onItem: V => (Async) ?=> Boolean): StreamPull = new StreamPull:
+        var upstream: StreamPull = null
+
+        def pull()(using Async): Option[StreamResult.Done] =
+          while true do
+            if upstream == null then
+              ensureReader() match
+                case null        => upstream = reader.pull(onItem)
+                case Left(value) => return Some(value)
+
+            upstream.pull() match
+              case None => return None
+              case res @ Some(close) =>
+                upstream = null
+                if onInnerClosed(close) then return res
+          null // unreachable
+      end pull
     end ReaderLayer
 
     class ReaderMixer[T, V](upstream: PullReaderStream[T], outerParallelism: Int, mapper: T => PullReaderStream[V])
@@ -644,8 +671,8 @@ object PullLayers extends TransformLayers:
           .flatMap: upstreamSource =>
             val innerParallelism = Math.ceilDiv(parallelism, effectiveOuter)
             val context = handleMaybeIt(upstreamSource)(
-              SingleStreamContext(_, outerParallelism, innerParallelism, mapper)
-            )(IteratorStreamContext(_, outerParallelism, innerParallelism, mapper))
+              StreamContext(outerParallelism, innerParallelism, _, mapper)
+            )(StreamContext(outerParallelism, innerParallelism, _, mapper))
             Resource(Iterator.continually(ReaderLayer(context)), { _ => context.cancelAll() })
   end FlatMapLayer
 end PullLayers
