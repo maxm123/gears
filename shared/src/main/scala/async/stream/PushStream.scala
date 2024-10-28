@@ -444,25 +444,28 @@ object PushLayers extends TransformLayers:
         hd
     end CapturingIterator
 
+    def splitSenders[T](sender: PushDestination[StreamSender, T]) =
+      handleMaybeIt(sender)(s => (s, s)): iterator =>
+        val s1 = iterator.next()
+        if iterator.hasNext then
+          // multiple senders exist -> reserve one for each stream, distribute the rest on demand
+          val s2 = iterator.next()
+          val i1: Iterator[StreamSender[T]] = CapturingIterator(iterator) // captures one element for multithreaded
+          val i2: Iterator[StreamSender[T]] = CapturingIterator(iterator) //              hasNext-next coordination
+          (Iterator(s1) ++ i1, Iterator(s2) ++ i2)
+        else
+          // only one single sender exists -> synchronize access
+          val safeSender = StreamSender.synchronizedSender(s1)
+          (safeSender, safeSender)
+    end splitSenders
+
     class SenderSplitter[T](base1: PushSenderStream[T], base2: PushSenderStream[T]) extends PushSenderStream[T]:
       def runToSender(sender: PushDestination[StreamSender, T])(using Async): Unit =
-        val (sender1, sender2) = handleMaybeIt(sender)(s => (s, s)): iterator =>
-          val s1 = iterator.next()
-          if iterator.hasNext then
-            // multiple senders exist -> reserve one for each stream, distribute the rest on demand
-            val s2 = iterator.next()
-            val i1: Iterator[StreamSender[T]] = CapturingIterator(iterator) // captures one element for multithreaded
-            val i2: Iterator[StreamSender[T]] = CapturingIterator(iterator) //              hasNext-next coordination
-            (Iterator(s1) ++ i1, Iterator(s2) ++ i2)
-          else
-            // only one single sender exists -> synchronize access
-            val safeSender = StreamSender.synchronizedSender(s1)
-            (safeSender, safeSender)
+        val (sender1, sender2) = splitSenders(sender)
 
         Async.group:
           val f1 = Future(base1.runToSender(sender1))
           val f2 = Future(base2.runToSender(sender2))
           Seq(f1, f2).awaitAll
-
   end MergeLayer
 end PushLayers

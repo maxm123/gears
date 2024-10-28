@@ -212,7 +212,7 @@ object StreamBundleTransform:
 
   trait SingleOpGen[F <: InOutFamily]:
     val fam: F
-    def genPull[V]: fam.PullStream[V] with TopOps[V]
+    def genPull[V](parHint: Int): fam.PullStream[V] with TopOps[V]
     def genPush[V]: fam.PushStream[V] with TopOps[V]
 
   trait PrependHelper[F <: InOutFamily, +T <: BundleType[F]] extends StreamBundleTransform[F, T]:
@@ -223,7 +223,8 @@ object StreamBundleTransform:
       new PrependHelper[F, BNext[F, V, Pull[V], T]]:
         val fam: self.fam.type = self.fam
         val og = self.og
-        protected def genOps: AppliedOpsTop[fam.type, BNext[F, V, Pull[V], T]] = og.genPull[V] *: self.genOps
+        protected def genOps: AppliedOpsTop[fam.type, BNext[F, V, Pull[V], T]] =
+          og.genPull[V](ps.parallelismHint) *: self.genOps
         def run(
             in: OpsInputs[AppliedOps[fam.type, BNext[F, V, Pull[V], T]]]
         ): Resource[OpsOutputs[AppliedOps[fam.type, BNext[F, V, Pull[V], T]]]] =
