@@ -4,66 +4,66 @@ import gears.async.Async
 import gears.async.Future
 import gears.async.Resource
 import gears.async.stream.BufferedStreamChannel.Size
+import gears.async.stream.BundleFamily.PullStream
+import gears.async.stream.BundleFamily.PushStream
 import gears.async.stream.InOutFamily.OpsInputs
 import gears.async.stream.InOutFamily.OpsOutputs
-import gears.async.stream.MixedFamily.PullStream
-import gears.async.stream.MixedFamily.PushStream
 import gears.async.stream.StreamType.Pull
 import gears.async.stream.StreamType.Push
 
 import scala.util.Try
 
-import MixedStreamTransform.*
+import StreamBundleTransform.*
 
-object MixedFamily extends InOutFamily:
+object BundleFamily extends InOutFamily:
   type Result[+T] = Unit
   type FamilyOps[+T] = InOutFamily.InOutOps[T] with BotOps[T]
-  type PushStream[+T] = MixedFamily.PushStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T] {
+  type PushStream[+T] = BundleFamily.PushStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T] {
     type In[V] = InOutFamily.PushIn[V]
     type Out[V] = InOutFamily.PushOut[V]
   }
-  type PullStream[+T] = MixedFamily.PullStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T] {
+  type PullStream[+T] = BundleFamily.PullStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T] {
     type In[V] = InOutFamily.PullIn[V]
     type Out[V] = InOutFamily.PullOut[V]
   }
-end MixedFamily
+end BundleFamily
 
-private trait MixedPushMixer[T, V](upstream: MixedPushStream[T]) extends MixedPushStream[V]:
+private trait BundledPushMixer[T, V](upstream: BundledPushStream[T]) extends BundledPushStream[V]:
   self: PushLayers.DestTransformer[StreamSender, T, V] =>
   def storeInput(in: PushDestination[StreamSender, V]): Unit = upstream.storeInput(transform(in))
   def loadOutput(): Out[T] = upstream.loadOutput()
 
-trait MixedPushStream[T] extends MixedFamily.PushStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T]:
+trait BundledPushStream[T] extends BundleFamily.PushStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T]:
   self =>
   type In[V] = PushDestination[StreamSender, V]
   type Out[V] = Future[Unit]
 
   override def map[V](mapper: T => V): PushStream[V] =
-    new PushLayers.MapLayer.SenderTransformer[T, V](mapper) with MixedPushMixer[T, V](this)
+    new PushLayers.MapLayer.SenderTransformer[T, V](mapper) with BundledPushMixer[T, V](this)
 
   override def filter(test: T => Boolean): PushStream[T] =
-    new PushLayers.FilterLayer.SenderTransformer[T](test) with MixedPushMixer[T, T](this)
+    new PushLayers.FilterLayer.SenderTransformer[T](test) with BundledPushMixer[T, T](this)
 
   override def take(count: Int): PushStream[T] =
-    new PushLayers.TakeLayer.SenderTransformer[T](count) with MixedPushMixer[T, T](this)
+    new PushLayers.TakeLayer.SenderTransformer[T](count) with BundledPushMixer[T, T](this)
 
   override def flatMap[V](outerParallelism: Int)(mapper: T => PushStream[V]): PushStream[V] = ???
 
-  override def fold(folder: StreamFolder[T]): MixedFamily.Result[Try[folder.Container]] = ()
+  override def fold(folder: StreamFolder[T]): BundleFamily.Result[Try[folder.Container]] = ()
 
   override def toPushStream(): PushStream[T] = this
   override def toPushStream(parallelism: Int): PushStream[T] = this
 
-  override def pulledThrough(bufferSize: Int, parHint: Int): PullStream[T] = new MixedPullStream[T]:
+  override def pulledThrough(bufferSize: Int, parHint: Int): PullStream[T] = new BundledPullStream[T]:
     val buf = BufferedStreamChannel[T](bufferSize)
     override def storeInput(in: Unit): Unit = self.storeInput(buf)
     override def loadOutput(): this.Out[T] =
       val _: Future[Unit] = self.loadOutput()
       buf
     override def parallelismHint: Int = parHint
-end MixedPushStream
+end BundledPushStream
 
-trait MixedPullStream[+T] extends MixedFamily.PullStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T]:
+trait BundledPullStream[+T] extends BundleFamily.PullStreamOps[T] with InOutFamily.InOutOps[T] with BotOps[T]:
   self =>
   type In[V] = Unit
   type Out[V] = PullSource[StreamReader, V]
@@ -76,11 +76,11 @@ trait MixedPullStream[+T] extends MixedFamily.PullStreamOps[T] with InOutFamily.
 
   override def flatMap[V](outerParallelism: Int)(mapper: T => PullStream[V]): PullStream[V] = ???
 
-  override def fold(parallelism: Int, folder: StreamFolder[T]): MixedFamily.Result[Try[folder.Container]] = ()
+  override def fold(parallelism: Int, folder: StreamFolder[T]): BundleFamily.Result[Try[folder.Container]] = ()
 
   override def pushedBy[V](parallelism: Int)(
       task: (StreamReader[T], StreamSender[V]) => (Async) ?=> Unit
-  ): PushStream[V] = new MixedPushStream[V]:
+  ): PushStream[V] = new BundledPushStream[V]:
     var dest: PushDestination[StreamSender, V] = null
 
     override def storeInput(in: PushDestination[StreamSender, V]): Unit =
@@ -91,13 +91,15 @@ trait MixedPullStream[+T] extends MixedFamily.PullStreamOps[T] with InOutFamily.
       (null: Future[Unit])
 
   override def toPullStream()(using Size): PullStream[T] = this
-end MixedPullStream
+end BundledPullStream
 
-private type MFStream[T <: StreamType[InOutFamily]] = MixedStreamTransform[InOutFamily, T] { val fam: MixedFamily.type }
+private type MFStream[T <: BundleType[InOutFamily]] = StreamBundleTransform[InOutFamily, T] {
+  val fam: BundleFamily.type
+}
 
-private trait MixedStreamPrepend[T <: StreamType[InOutFamily]]:
+private trait StreamBundlePrepend[T <: BundleType[InOutFamily]]:
   self: MFStream[T] =>
-  val fam = MixedFamily
+  val fam = BundleFamily
 
   // TODO remove
   inline def cast[V](fam: Family)(
@@ -111,54 +113,54 @@ private trait MixedStreamPrepend[T <: StreamType[InOutFamily]]:
     AppliedOpsTop[f.type, T] = // AppliedOpsTop[f.type, SNext[InOutFamily, Pull[V], T]] =
     s *: rest
 
-  def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[InOutFamily, Pull[V], T]] =
-    new MixedStreamTransform[InOutFamily, SNext[InOutFamily, Pull[V], T]]
-      with MixedStreamPrepend[SNext[InOutFamily, Pull[V], T]]:
-      protected def genOps: AppliedOpsTop[fam.type, SNext[InOutFamily, Pull[V], T]] =
+  def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[InOutFamily, Pull[V], T]] =
+    new StreamBundleTransform[InOutFamily, BNext[InOutFamily, Pull[V], T]]
+      with StreamBundlePrepend[BNext[InOutFamily, Pull[V], T]]:
+      protected def genOps: AppliedOpsTop[fam.type, BNext[InOutFamily, Pull[V], T]] =
         val newOps: (fam.PullStream[V] with TopOps[V]) =
-          new MixedPullStream[V] with TopOpsStore[V]:
+          new BundledPullStream[V] with TopOpsStore[V]:
             def parallelismHint: Int = ps.parallelismHint
         // ??? *: self.genOps
-        // val newOps3 = (newOps: MixedFamily.PullStream[V] with TopOps[V])
+        // val newOps3 = (newOps: BundleFamily.PullStream[V] with TopOps[V])
         // val newOps3: StreamType.PullStream[fam.type, V] with TopOps[V] = cast(fam)(newOps)
         val newOps2 = newOps.asInstanceOf[StreamType.PullStream[fam.type, V] with TopOps[V]]
-        // summon[MixedFamily.PullStream[String] <:< BotOps[String]]
-        // summon[MixedStreamTransform.ItsTop[MixedFamily.PullStreamOps[String]] =:= TopOps[String]]
-        // summon[newOps.type <:< StreamType.PullStream[MixedFamily.type, V]]
+        // summon[BundleFamily.PullStream[String] <:< BotOps[String]]
+        // summon[StreamBundleTransform.ItsTop[BundleFamily.PullStreamOps[String]] =:= TopOps[String]]
+        // summon[newOps.type <:< StreamType.PullStream[BundleFamily.type, V]]
         // val f: Family = ???
         // summon[StreamType.PullStream[f.type, V] =:= f.PullStream[V]]
-        // summon[StreamType.PullStream[MixedFamily.type, V] =:= MixedFamily.PullStream[V]]
-        // summon[StreamType.FamilyOps[MixedFamily.type, V] =:= MixedFamily.FamilyOps[V]]
+        // summon[StreamType.PullStream[BundleFamily.type, V] =:= BundleFamily.PullStream[V]]
+        // summon[BundleType.FamilyOps[BundleFamily.type, V] =:= BundleFamily.FamilyOps[V]]
         // val x: AppliedOpsTop[fam.type, SNext[InOutFamily, Pull[V], T]] = self.combine[V](fam)(newOps, ???)
         // (newOps2) *: self.genOps
         null
 
       def run(
-          in: OpsInputs[AppliedOps[MixedFamily.type, SNext[InOutFamily, Pull[V], T]]]
-      ): Resource[OpsOutputs[AppliedOps[MixedFamily.type, SNext[InOutFamily, Pull[V], T]]]] = ???
+          in: OpsInputs[AppliedOps[BundleFamily.type, BNext[InOutFamily, Pull[V], T]]]
+      ): Resource[OpsOutputs[AppliedOps[BundleFamily.type, BNext[InOutFamily, Pull[V], T]]]] = ???
 
-  def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[InOutFamily, Push[V], T]] = ???
+  def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[InOutFamily, Push[V], T]] = ???
 
 private object IofOg extends SingleOpGen[InOutFamily]:
-  val fam: MixedFamily.type = MixedFamily
+  val fam: BundleFamily.type = BundleFamily
   /*
   def genPull[V]: fam.PullStream[V] &
     ((gears.async.stream.IofOg#fam.PullStreamOps[V] & gears.async.stream.IofOg#fam.FamilyOps[V]){type In[V] = stream.InOutFamily.PullIn[V]; type Out[V] = stream.InOutFamily.PullOut[V]} match {
-      case stream.StreamOps[t] => gears.async.stream.MixedStreamTransform.TopOps[t]
+      case stream.StreamOps[t] => gears.async.stream.StreamBundleTransform.TopOps[t]
     }) = ??? */
   def genPull[V]: fam.PullStream[V] & ItsTop[fam.PullStream[V]] =
-    new MixedPullStream[V] with TopOpsStore[V]:
+    new BundledPullStream[V] with TopOpsStore[V]:
       def parallelismHint: Int = 1 // ps.parallelismHint
     ???
 
-val emptyMixedStream: MixedStream[InOutFamily, SEmpty] = new PrependHelper:
-  val fam = MixedFamily
+val emptyStreamBundle: StreamBundle[InOutFamily, BEmpty] = new PrependHelper:
+  val fam = BundleFamily
   val og = ???
-  protected def genOps: AppliedOpsTop[fam.type, SEmpty] = Tuple()
+  protected def genOps: AppliedOpsTop[fam.type, BEmpty] = Tuple()
   def run(
-      in: InOutFamily.OpsInputs[AppliedOps[fam.type, SEmpty]]
-  ): Resource[InOutFamily.OpsOutputs[AppliedOps[fam.type, SEmpty]]] =
+      in: InOutFamily.OpsInputs[AppliedOps[fam.type, BEmpty]]
+  ): Resource[InOutFamily.OpsOutputs[AppliedOps[fam.type, BEmpty]]] =
     Resource(Tuple(), _ => ())
 
-  // def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[InOutFamily, Pull[V], SEmpty.type]] = ???
-  // def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[InOutFamily, Push[V], SEmpty.type]] = ???
+  // def prependedPull[V](ps: PullReaderStream[V]): WithBundle[SNext[InOutFamily, Pull[V], SEmpty.type]] = ???
+  // def prependedPush[V](ps: PushSenderStream[V]): WithBundle[SNext[InOutFamily, Push[V], SEmpty.type]] = ???

@@ -5,14 +5,14 @@ import gears.async.Future
 import gears.async.Resource
 import gears.async.stream.InOutFamily.OpsInputs
 import gears.async.stream.InOutFamily.OpsOutputs
-import gears.async.stream.MixedStream.Tfr
-import gears.async.stream.StreamType.{AnyStreamTpe, Applied, FamilyOps, OpsType, Pull, Push}
+import gears.async.stream.StreamBundle.Tfr
+import gears.async.stream.StreamType.{FamilyOps, Pull, Push}
 
 import scala.annotation.unchecked.uncheckedVariance
 
-type AppliedOps[G <: Family, +T <: StreamType[_ >: G]] <: Tuple = T @uncheckedVariance match
-  case SEmpty         => EmptyTuple
-  case SNext[_, t, s] => OpsType[G, t] *: AppliedOps[G, s]
+type AppliedOps[G <: Family, +T <: BundleType[_ >: G]] <: Tuple = T @uncheckedVariance match
+  case BEmpty         => EmptyTuple
+  case BNext[_, t, s] => t[G] *: AppliedOps[G, s]
 
 trait InOutFamily extends Family:
   type FamilyOps[+T] <: InOutFamily.InOutOps[T]
@@ -46,30 +46,30 @@ object InOutFamily:
     case OpsOutAux[t, out] *: rest => out[t] *: OpsOutputs[rest]
 end InOutFamily
 
-trait MixedStream[F <: InOutFamily, +T <: StreamType[F]]:
+trait StreamBundle[F <: InOutFamily, +T <: BundleType[F]]:
   self =>
 
-  type SameMixed[+T <: StreamType[F]] = MixedStream[F, T] { val fam: self.fam.type }
+  type WithBundle[+T <: BundleType[F]] = StreamBundle[F, T] { val fam: self.fam.type }
 
   val fam: F
 
   def run(in: InOutFamily.OpsInputs[AppliedOps[fam.type, T]]): Resource[InOutFamily.OpsOutputs[AppliedOps[fam.type, T]]]
 
-  def transform[O <: StreamType[F]](f: MixedStream.Tfr[fam.type, T, O]): SameMixed[O]
+  def transform[O <: BundleType[F]](f: StreamBundle.Tfr[fam.type, T, O]): WithBundle[O]
 
-  def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[F, Pull[V], T]]
-  def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[F, Push[V], T]]
-end MixedStream
+  def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, Pull[V], T]]
+  def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, Push[V], T]]
+end StreamBundle
 
-object MixedStream:
-  type Tfr[F <: Family, -T <: StreamType[_ >: F], +O <: StreamType[_ >: F]] =
+object StreamBundle:
+  type Tfr[F <: Family, -T <: BundleType[_ >: F], +O <: BundleType[_ >: F]] =
     Function1[AppliedOps[F, T], AppliedOps[F, O]]
-end MixedStream
+end StreamBundle
 
-trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedStream[F, T]:
+trait StreamBundleTransform[F <: InOutFamily, +T <: BundleType[F]] extends StreamBundle[F, T]:
   self =>
   import InOutFamily.*
-  import MixedStreamTransform.*
+  import StreamBundleTransform.*
 
   val fam: F {
     type FamilyOps[+V] <: BotOps[V]
@@ -77,8 +77,8 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
 
   protected def genOps: AppliedOpsTop[fam.type, T]
 
-  override def transform[O <: StreamType[F]](f: MixedStream.Tfr[fam.type, T, O]): SameMixed[O] =
-    type STypeCast[S <: StreamType[F]] = S
+  override def transform[O <: BundleType[F]](f: StreamBundle.Tfr[fam.type, T, O]): WithBundle[O] =
+    type STypeCast[S <: BundleType[F]] = S
 
     type TopOpsInAux[T, A[-_]] = TopOps[T] { type In[-V] = A[V] }
     type TopOpsInputs[O <: Tuple] <: Tuple = O match
@@ -90,10 +90,10 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
       case EmptyTuple                   => EmptyTuple
       case BotOpsOutAux[t, out] *: rest => out[t] *: BotOpsOutputs[rest]
 
-    new MixedStream[F, O]:
+    new StreamBundle[F, O]:
       val fam: self.fam.type = self.fam
 
-      def storeInputs[C <: StreamType[F]](ops: AppliedOps[fam.type, C], ins: OpsInputs[AppliedOps[fam.type, C]]): Unit =
+      def storeInputs[C <: BundleType[F]](ops: AppliedOps[fam.type, C], ins: OpsInputs[AppliedOps[fam.type, C]]): Unit =
         ops match
           case _: EmptyTuple => ()
           // FamilyOps[G, tpe] >: OpsType[G, tpe] for any family G (here: G=fam.type)
@@ -112,7 +112,7 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
           case tup: (TopOpsInAux[t, in] *: rest) =>
             tup.head.getInput() *: getInputs(tup.tail)
 
-      def setOutput[C <: StreamType[F]](
+      def setOutput[C <: BundleType[F]](
           ops: AppliedOpsTop[fam.type, C],
           outs: OpsOutputs[AppliedOpsTop[fam.type, C]]
       ): Unit = ops match
@@ -175,22 +175,22 @@ trait MixedStreamTransform[F <: InOutFamily, +T <: StreamType[F]] extends MixedS
             (loadOutputs[AppliedOps[fam.type, O]](botOps): BotOpsOutputs[AppliedOps[fam.type, O]])
               .asInstanceOf[OpsOutputs[AppliedOps[fam.type, O]]]
 
-      override def transform[O2 <: StreamType[F]](f2: Tfr[fam.type, O, O2]): SameMixed[O2] =
+      override def transform[O2 <: BundleType[F]](f2: Tfr[fam.type, O, O2]): WithBundle[O2] =
         self.transform(in => f2(f(in)))
 
-      override def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[F, Push[V], O]] =
+      override def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, Push[V], O]] =
         self.prependedPush(ps).transform { case p *: rest => p *: f(rest) }
-      override def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[F, Pull[V], O]] =
+      override def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, Pull[V], O]] =
         self.prependedPull(ps).transform { case p *: rest => p *: f(rest) }
-end MixedStreamTransform
+end StreamBundleTransform
 
-object MixedStreamTransform:
+object StreamBundleTransform:
   type ItsTop[T <: StreamOps[_]] = T match
     case StreamOps[t] => TopOps[t]
 
-  type AppliedOpsTop[G <: Family, +T <: StreamType[_ >: G]] <: Tuple = T @uncheckedVariance match
-    case SEmpty         => EmptyTuple
-    case SNext[_, t, s] => (OpsType[G, t] & ItsTop[OpsType[G, t]]) *: AppliedOpsTop[G, s]
+  type AppliedOpsTop[G <: Family, +T <: BundleType[_ >: G]] <: Tuple = T @uncheckedVariance match
+    case BEmpty         => EmptyTuple
+    case BNext[_, t, s] => (t[G] & ItsTop[t[G]]) *: AppliedOpsTop[G, s]
 
   trait TopOps[T] extends StreamOps[T]:
     self: InOutFamily.InOutOps[T] =>
@@ -214,23 +214,23 @@ object MixedStreamTransform:
 
   trait SingleOpGen[F <: InOutFamily]:
     val fam: F
-    def genPull[V]: fam.PullStream[V] with MixedStreamTransform.ItsTop[fam.PullStream[V]]
+    def genPull[V]: fam.PullStream[V] with StreamBundleTransform.ItsTop[fam.PullStream[V]]
 
-  trait PrependHelper[F <: InOutFamily, +T <: StreamType[F]] extends MixedStreamTransform[F, T]:
+  trait PrependHelper[F <: InOutFamily, +T <: BundleType[F]] extends StreamBundleTransform[F, T]:
     self =>
     val og: SingleOpGen[F] { val fam: self.fam.type }
 
-    def prependedPull[V](ps: PullReaderStream[V]): SameMixed[SNext[F, Pull[V], T]] =
-      new PrependHelper[F, SNext[F, Pull[V], T]]:
+    def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, Pull[V], T]] =
+      new PrependHelper[F, BNext[F, Pull[V], T]]:
         val fam: self.fam.type = self.fam
         val og = self.og
-        protected def genOps: AppliedOpsTop[fam.type, SNext[F, Pull[V], T]] = og.genPull[V] *: self.genOps
+        protected def genOps: AppliedOpsTop[fam.type, BNext[F, Pull[V], T]] = og.genPull[V] *: self.genOps
         def run(
-            in: OpsInputs[AppliedOps[fam.type, SNext[F, Pull[V], T]]]
-        ): Resource[OpsOutputs[AppliedOps[fam.type, SNext[F, Pull[V], T]]]] =
+            in: OpsInputs[AppliedOps[fam.type, BNext[F, Pull[V], T]]]
+        ): Resource[OpsOutputs[AppliedOps[fam.type, BNext[F, Pull[V], T]]]] =
           val o1 = ps.toReader(ps.parallelismHint)
           val o2 = self.run(in.tail)
           Resource.both(o1, o2)(_ *: _)
 
-    def prependedPush[V](ps: PushSenderStream[V]): SameMixed[SNext[F, Push[V], T]] = ???
-end MixedStreamTransform
+    def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, Push[V], T]] = ???
+end StreamBundleTransform
