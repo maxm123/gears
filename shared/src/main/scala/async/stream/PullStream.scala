@@ -336,7 +336,6 @@ private object PullLayers:
           else
             remaining.set(0)
             true
-
         () => if remaining.get() > 0 then handle() else Some(StreamResult.Closed)
 
       override def readStream()(using Async): StreamResult[T] =
@@ -382,7 +381,6 @@ private object PullLayers:
           lock.unlock()
 
           if doPass then onItem(item) else true
-
         () => if counter.remaining > 0 then handle() else Some(StreamResult.Closed)
 
       override def readStream()(using Async): StreamResult[T] =

@@ -7,12 +7,13 @@ import gears.async.stream.InOutFamily.OpsInputs
 import gears.async.stream.InOutFamily.OpsOutputs
 import gears.async.stream.StreamBundle.Tfr
 import gears.async.stream.StreamType.{FamilyOps, Pull, Push}
+import gears.async.stream.StreamType.{PullStream, PushStream}
 
 import scala.annotation.unchecked.uncheckedVariance
 
 type AppliedOps[G <: Family, +T <: BundleType[_ >: G]] <: Tuple = T @uncheckedVariance match
-  case BEmpty         => EmptyTuple
-  case BNext[_, t, s] => t[G] *: AppliedOps[G, s]
+  case BEmpty            => EmptyTuple
+  case BNext[_, a, t, s] => t[G] *: AppliedOps[G, s]
 
 trait InOutFamily extends Family:
   type FamilyOps[+T] <: InOutFamily.InOutOps[T]
@@ -57,8 +58,8 @@ trait StreamBundle[F <: InOutFamily, +T <: BundleType[F]]:
 
   def transform[O <: BundleType[F]](f: StreamBundle.Tfr[fam.type, T, O]): WithBundle[O]
 
-  def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, Pull[V], T]]
-  def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, Push[V], T]]
+  def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, V, Pull[V], T]]
+  def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, V, Push[V], T]]
 end StreamBundle
 
 object StreamBundle:
@@ -178,19 +179,16 @@ trait StreamBundleTransform[F <: InOutFamily, +T <: BundleType[F]] extends Strea
       override def transform[O2 <: BundleType[F]](f2: Tfr[fam.type, O, O2]): WithBundle[O2] =
         self.transform(in => f2(f(in)))
 
-      override def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, Push[V], O]] =
+      override def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, V, Push[V], O]] =
         self.prependedPush(ps).transform { case p *: rest => p *: f(rest) }
-      override def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, Pull[V], O]] =
+      override def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, V, Pull[V], O]] =
         self.prependedPull(ps).transform { case p *: rest => p *: f(rest) }
 end StreamBundleTransform
 
 object StreamBundleTransform:
-  type ItsTop[T <: StreamOps[_]] = T match
-    case StreamOps[t] => TopOps[t]
-
   type AppliedOpsTop[G <: Family, +T <: BundleType[_ >: G]] <: Tuple = T @uncheckedVariance match
-    case BEmpty         => EmptyTuple
-    case BNext[_, t, s] => (t[G] & ItsTop[t[G]]) *: AppliedOpsTop[G, s]
+    case BEmpty            => EmptyTuple
+    case BNext[_, a, t, s] => (t[G] & TopOps[a]) *: AppliedOpsTop[G, s]
 
   trait TopOps[T] extends StreamOps[T]:
     self: InOutFamily.InOutOps[T] =>
@@ -214,23 +212,34 @@ object StreamBundleTransform:
 
   trait SingleOpGen[F <: InOutFamily]:
     val fam: F
-    def genPull[V]: fam.PullStream[V] with StreamBundleTransform.ItsTop[fam.PullStream[V]]
+    def genPull[V]: fam.PullStream[V] with TopOps[V]
+    def genPush[V]: fam.PushStream[V] with TopOps[V]
 
   trait PrependHelper[F <: InOutFamily, +T <: BundleType[F]] extends StreamBundleTransform[F, T]:
     self =>
     val og: SingleOpGen[F] { val fam: self.fam.type }
 
-    def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, Pull[V], T]] =
-      new PrependHelper[F, BNext[F, Pull[V], T]]:
+    def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[F, V, Pull[V], T]] =
+      new PrependHelper[F, BNext[F, V, Pull[V], T]]:
         val fam: self.fam.type = self.fam
         val og = self.og
-        protected def genOps: AppliedOpsTop[fam.type, BNext[F, Pull[V], T]] = og.genPull[V] *: self.genOps
+        protected def genOps: AppliedOpsTop[fam.type, BNext[F, V, Pull[V], T]] = og.genPull[V] *: self.genOps
         def run(
-            in: OpsInputs[AppliedOps[fam.type, BNext[F, Pull[V], T]]]
-        ): Resource[OpsOutputs[AppliedOps[fam.type, BNext[F, Pull[V], T]]]] =
+            in: OpsInputs[AppliedOps[fam.type, BNext[F, V, Pull[V], T]]]
+        ): Resource[OpsOutputs[AppliedOps[fam.type, BNext[F, V, Pull[V], T]]]] =
           val o1 = ps.toReader(ps.parallelismHint)
           val o2 = self.run(in.tail)
           Resource.both(o1, o2)(_ *: _)
 
-    def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, Push[V], T]] = ???
+    def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[F, V, Push[V], T]] =
+      new PrependHelper[F, BNext[F, V, Push[V], T]]:
+        val fam: self.fam.type = self.fam
+        val og = self.og
+        protected def genOps: AppliedOpsTop[fam.type, BNext[F, V, Push[V], T]] = og.genPush[V] *: self.genOps
+        def run(
+            in: OpsInputs[AppliedOps[fam.type, BNext[F, V, Push[V], T]]]
+        ): Resource[OpsOutputs[AppliedOps[fam.type, BNext[F, V, Push[V], T]]]] =
+          val o1 = Resource.spawning(Future(ps.runToSender(in.head)))
+          val o2 = self.run(in.tail)
+          Resource.both(o1, o2)(_ *: _)
 end StreamBundleTransform

@@ -110,14 +110,14 @@ private trait StreamBundlePrepend[T <: BundleType[InOutFamily]]:
       s: f.PullStream[V] & TopOps[V],
       rest: AppliedOpsTop[f.type, T]
   ): (StreamType.PullStream[f.type, V] & TopOps[V]) *:
-    AppliedOpsTop[f.type, T] = // AppliedOpsTop[f.type, SNext[InOutFamily, Pull[V], T]] =
+    AppliedOpsTop[f.type, T] = // AppliedOpsTop[f.type, SNext[InOutFamily, V, Pull[V], T]] =
     s *: rest
 
-  def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[InOutFamily, Pull[V], T]] =
-    new StreamBundleTransform[InOutFamily, BNext[InOutFamily, Pull[V], T]]
-      with StreamBundlePrepend[BNext[InOutFamily, Pull[V], T]]:
-      protected def genOps: AppliedOpsTop[fam.type, BNext[InOutFamily, Pull[V], T]] =
-        val newOps: (fam.PullStream[V] with TopOps[V]) =
+  def prependedPull[V](ps: PullReaderStream[V]): WithBundle[BNext[InOutFamily, V, Pull[V], T]] =
+    new StreamBundleTransform[InOutFamily, BNext[InOutFamily, V, Pull[V], T]]
+      with StreamBundlePrepend[BNext[InOutFamily, V, Pull[V], T]]:
+      protected def genOps: AppliedOpsTop[fam.type, BNext[InOutFamily, V, Pull[V], T]] =
+        val newOps =
           new BundledPullStream[V] with TopOpsStore[V]:
             def parallelismHint: Int = ps.parallelismHint
         // ??? *: self.genOps
@@ -131,36 +131,30 @@ private trait StreamBundlePrepend[T <: BundleType[InOutFamily]]:
         // summon[StreamType.PullStream[f.type, V] =:= f.PullStream[V]]
         // summon[StreamType.PullStream[BundleFamily.type, V] =:= BundleFamily.PullStream[V]]
         // summon[BundleType.FamilyOps[BundleFamily.type, V] =:= BundleFamily.FamilyOps[V]]
-        // val x: AppliedOpsTop[fam.type, SNext[InOutFamily, Pull[V], T]] = self.combine[V](fam)(newOps, ???)
+        // val x: AppliedOpsTop[fam.type, SNext[InOutFamily, V, Pull[V], T]] = self.combine[V](fam)(newOps, ???)
         // (newOps2) *: self.genOps
-        null
+        // newOps *: self.genOps
+        ???
 
       def run(
-          in: OpsInputs[AppliedOps[BundleFamily.type, BNext[InOutFamily, Pull[V], T]]]
-      ): Resource[OpsOutputs[AppliedOps[BundleFamily.type, BNext[InOutFamily, Pull[V], T]]]] = ???
+          in: OpsInputs[AppliedOps[BundleFamily.type, BNext[InOutFamily, V, Pull[V], T]]]
+      ): Resource[OpsOutputs[AppliedOps[BundleFamily.type, BNext[InOutFamily, V, Pull[V], T]]]] = ???
 
-  def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[InOutFamily, Push[V], T]] = ???
+  def prependedPush[V](ps: PushSenderStream[V]): WithBundle[BNext[InOutFamily, V, Push[V], T]] = ???
 
 private object IofOg extends SingleOpGen[InOutFamily]:
   val fam: BundleFamily.type = BundleFamily
-  /*
-  def genPull[V]: fam.PullStream[V] &
-    ((gears.async.stream.IofOg#fam.PullStreamOps[V] & gears.async.stream.IofOg#fam.FamilyOps[V]){type In[V] = stream.InOutFamily.PullIn[V]; type Out[V] = stream.InOutFamily.PullOut[V]} match {
-      case stream.StreamOps[t] => gears.async.stream.StreamBundleTransform.TopOps[t]
-    }) = ??? */
-  def genPull[V]: fam.PullStream[V] & ItsTop[fam.PullStream[V]] =
+  def genPull[V]: fam.PullStream[V] & TopOps[V] =
     new BundledPullStream[V] with TopOpsStore[V]:
       def parallelismHint: Int = 1 // ps.parallelismHint
-    ???
+
+  def genPush[V]: fam.PushStream[V] & TopOps[V] = new BundledPushStream[V] with TopOpsStore[V]
 
 val emptyStreamBundle: StreamBundle[InOutFamily, BEmpty] = new PrependHelper:
-  val fam = BundleFamily
-  val og = ???
+  val fam: BundleFamily.type = BundleFamily
+  val og = IofOg
   protected def genOps: AppliedOpsTop[fam.type, BEmpty] = Tuple()
   def run(
       in: InOutFamily.OpsInputs[AppliedOps[fam.type, BEmpty]]
   ): Resource[InOutFamily.OpsOutputs[AppliedOps[fam.type, BEmpty]]] =
     Resource(Tuple(), _ => ())
-
-  // def prependedPull[V](ps: PullReaderStream[V]): WithBundle[SNext[InOutFamily, Pull[V], SEmpty.type]] = ???
-  // def prependedPush[V](ps: PushSenderStream[V]): WithBundle[SNext[InOutFamily, Push[V], SEmpty.type]] = ???

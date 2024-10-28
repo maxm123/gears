@@ -8,11 +8,8 @@ import scala.annotation.unchecked.uncheckedVariance
 sealed trait BundleType[-F <: Family]
 object BEmpty extends BundleType[Family]
 type BEmpty = BEmpty.type
-sealed abstract class BNext[-F <: Family, +Ops[G <: F] <: StreamType.FamilyOps[G, _], +S <: BundleType[F]]
+sealed abstract class BNext[-F <: Family, +A, +Ops[G <: F] <: StreamType.FamilyOps[G, A], +S <: BundleType[F]]
     extends BundleType[F]
-
-object BundleType:
-  type **:[+Ops[G <: Family] <: StreamType.FamilyOps[G, _], +S <: BundleType[Family]] = BNext[Family, Ops, S]
 
 object StreamType:
   // utility types to extract parts from a given stream type
