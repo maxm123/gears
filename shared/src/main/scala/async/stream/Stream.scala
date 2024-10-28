@@ -2,6 +2,7 @@ package gears.async.stream
 
 import gears.async.Async
 import gears.async.Resource
+import gears.async.stream.StreamFolder.reducing
 
 import java.util.concurrent.atomic.AtomicReference
 import scala.annotation.targetName
@@ -45,6 +46,21 @@ object StreamFolder:
       def merge(c1: HashMap[K, V], c2: HashMap[K, V]): Container =
         c1.merged(c2) { case ((k, v1), (_, v2)) => (k, combine(k, v1, v2)) }
     }
+
+  /** Create a folder for a group given its neutral element and a reduction operation. Note that the neutral element may
+    * be reduced multiple times.
+    *
+    * @return
+    *   a folder using the same reduction for items and container joining
+    */
+  def reducing[T](neutral: T)(reduce: (T, T) => T): StreamFolder[T] { type Container = T } =
+    new StreamFolder[T]:
+      type Container = T
+      def create(): Container = neutral
+      def add(c: Container, item: T): Container = reduce(c, item)
+      def merge(c1: Container, c2: Container): Container = reduce(c1, c2)
+  end reducing
+end StreamFolder
 
 private[stream] trait TransformLayers:
   inline def handleMaybeIt[S[_], T, V](
